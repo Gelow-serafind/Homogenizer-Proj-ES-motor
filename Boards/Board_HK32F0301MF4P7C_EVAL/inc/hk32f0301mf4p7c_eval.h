@@ -141,16 +141,17 @@ typedef enum
 #define EVAL_COM1                        UART1
 #define EVAL_COM1_CLK                    RCC_APBPeriph2_UART1
 
-#define EVAL_COM1_TX_PIN                 GPIO_Pin_3
-#define EVAL_COM1_TX_GPIO_PORT           GPIOA
-#define EVAL_COM1_TX_GPIO_CLK            RCC_AHBPeriph_GPIOA
-#define EVAL_COM1_TX_SOURCE              GPIO_PinSource3
+/* 新板（V1.0 原理图）：USART1 TX=PD4, RX=PB4（115200 8N1 调试串口 H1） */
+#define EVAL_COM1_TX_PIN                 GPIO_Pin_4
+#define EVAL_COM1_TX_GPIO_PORT           GPIOD
+#define EVAL_COM1_TX_GPIO_CLK            RCC_AHBPeriph_GPIOD
+#define EVAL_COM1_TX_SOURCE              GPIO_PinSource4
 #define EVAL_COM1_TX_AF                  GPIO_AF_1
 
-#define EVAL_COM1_RX_PIN                 GPIO_Pin_6
-#define EVAL_COM1_RX_GPIO_PORT           GPIOD
-#define EVAL_COM1_RX_GPIO_CLK            RCC_AHBPeriph_GPIOD
-#define EVAL_COM1_RX_SOURCE              GPIO_PinSource6
+#define EVAL_COM1_RX_PIN                 GPIO_Pin_4
+#define EVAL_COM1_RX_GPIO_PORT           GPIOB
+#define EVAL_COM1_RX_GPIO_CLK            RCC_AHBPeriph_GPIOB
+#define EVAL_COM1_RX_SOURCE              GPIO_PinSource4
 #define EVAL_COM1_RX_AF                  GPIO_AF_1
 
 #define EVAL_COM1_IRQn                   UART1_IRQn

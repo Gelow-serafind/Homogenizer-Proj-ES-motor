@@ -11,7 +11,10 @@
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
 /* Private macro -------------------------------------------------------------*/
-#define PWM_TARGET_FREQ_HZ 17570UL
+#define PWM_TARGET_FREQ_HZ 10000UL   /* 电机控制频率 10kHz（新板确认值） */
+
+/* 分步实施开关：STEP1 仅验证串口循环打印（屏蔽 LCD 驱动与电机占空比输出） */
+#define STEP1_UART_ONLY 1U
 
 /* 任务周期（ms），可通过宏调整每个任务响应时间 */
 #define TASK_PERIOD_ENCODER_MS 2U
@@ -30,9 +33,10 @@
 #define KEY_DEBOUNCE_TICKS     3U
 
 #define EC11_GPIO_PORT GPIOC
-#define EC11_PIN_A GPIO_Pin_3
-#define EC11_PIN_B GPIO_Pin_4
-#define EC11_PIN_KEY GPIO_Pin_5
+/* 新板（V1.0 原理图）：A=PC5, B=PC3, 按键=PC4；全部高有效（公共端接 5V，外部 10k 下拉） */
+#define EC11_PIN_A GPIO_Pin_5
+#define EC11_PIN_B GPIO_Pin_3
+#define EC11_PIN_KEY GPIO_Pin_4
 
 /* TM1729 (legacy wiring compatible with old project) */
 #define TM1729_GPIO_PORT      GPIOC
@@ -217,6 +221,8 @@ static uint16_t MotorRpm = 0;     /* 实际输出转速（运行时平滑 ramp�
 static volatile uint16_t CurrentDutyPermille = 0U;
 static volatile uint8_t DutyChanged = 1U;
 
+#if (STEP1_UART_ONLY == 0U)
+/* TM1729 显示缓冲（STEP1 阶段不启用，P2 将整体替换为 HT1623 驱动） */
 static uint8_t TM1729_BitBuf[TM1729_LCD_BUF_LEN] = {0};
 static const uint8_t TM1729_NumModel[17] = {
   0x3FU, 0x06U, 0x5BU, 0x4FU, 0x66U, 0x6DU, 0x7DU, 0x07U, 0x7FU, 0x6FU,
@@ -264,6 +270,7 @@ const unsigned char LCD_NumPos[] =
   LCD_5thNUM_f,
   LCD_5thNUM_g,
 };
+#endif /* STEP1_UART_ONLY */
 
 /* UART 命令输入系统 ---------------------------------------------------------*/
 #define UART_RX_RING_SIZE  64U
@@ -304,8 +311,10 @@ static const CmdEntry_t cmdTable[] = {
 static void UART_Config(void);
 static void TIM1_PWM_Config(void);
 static void TIM1_SetDutyPermille(uint16_t dutyPermille);
+#if (STEP1_UART_ONLY == 0U)
 static void TM1729_Init(void);
 static void TM1729_DemoUpdate(AppMode_t mode);
+#endif /* STEP1_UART_ONLY */
 
 static void EC11_Config(void);
 
@@ -323,6 +332,7 @@ static const char* GetModeName(AppMode_t mode);
 static uint16_t LoadLastRpm(void);
 static void SaveRpmToFlash(uint16_t rpm);
 
+#if (STEP1_UART_ONLY == 0U)
 static void TM1729_ShortDelay(void);
 static void TM1729_Start(void);
 static void TM1729_Stop(void);
@@ -335,6 +345,7 @@ static void TM1729_SetRpmIndicator(uint8_t enable);
 static void TM1729_ShowValueOnRange(uint16_t value, uint8_t firstIdx, uint8_t lastIdx);
 static void TM1729_WriteBuffer(void);
 static void TM1729_PortInit(void);
+#endif /* STEP1_UART_ONLY */
 
 /* 任务调度结构 */
 typedef void (*TaskHandler_t)(void);
@@ -345,11 +356,11 @@ typedef struct {
 } Task_t;
 
 static Task_t tasks[] = {
-  { TASK_PERIOD_ENCODER_MS, 0, Task_Encoder },
-  { TASK_PERIOD_UART_CMD_MS, 0, Task_UartCmd },
-  { TASK_PERIOD_APP_MS,     0, Task_App     },
-  { TASK_PERIOD_PWM_MS,     0, Task_PWM     },
-  { TASK_PERIOD_TM1729_MS,  0, Task_TM1729  },
+  { TASK_PERIOD_ENCODER_MS,   0, Task_Encoder  },
+  { TASK_PERIOD_UART_CMD_MS,  0, Task_UartCmd  },
+  { TASK_PERIOD_APP_MS,       0, Task_App      },
+  { TASK_PERIOD_PWM_MS,       0, Task_PWM      },
+  { TASK_PERIOD_TM1729_MS,    0, Task_TM1729   },
 };
 
 #define TASKS_COUNT (sizeof(tasks)/sizeof(tasks[0]))
@@ -376,8 +387,10 @@ int main(void)
   TIM1_PWM_Config();
   /* EC11 GPIO配置 */
   EC11_Config();
-  /* TM1729 屏幕配置（复用老项目接线与时序） */
+#if (STEP1_UART_ONLY == 0U)
+  /* TM1729 屏幕配置（复用老项目接线与时序，STEP1 不启用） */
   TM1729_Init();
+#endif /* STEP1_UART_ONLY */
 
   /* Configure SysTick Timer for 1ms interrupts */
   if (SysTick_Config(SystemCoreClock / 1000))
@@ -391,14 +404,14 @@ int main(void)
   FlashLastSavedRpm = ConfigRpm;
 
   printf("\n\r========================================\n\r");
-  printf("HK32F0301MxxxxC Homogenizer Demo\n\r");
+  printf("HK32F0301MxxxxC Homogenizer Demo (STEP1)\n\r");
   printf("========================================\n\r");
-  printf("UART1: 115200 baud, 8N1\n\r");
-  printf("TIM1 PWM: 17.57kHz, PD2 pin (CH2)\n\r");
-  printf("EC11 A/B/KEY: PC3/PC4/PC5 (active low)\n\r");
-  printf("TM1729 SCL/SDA: PC6/PC7\n\r");
-  printf("Long Press (3s): start / pause\n\r");
-  printf("Knob: adjust RPM (step 1000, min 5000)\n\r");
+  printf("UART1: 115200 baud, 8N1 (TX=PD4, RX=PB4)\n\r");
+  printf("TIM1 PWM: 10kHz, PD6 pin (CH2)\n\r");
+  printf("EC11 A/B/KEY: PC5/PC3/PC4 (active high)\n\r");
+  printf("KEY Start/Stop: PA2/PD7 (active low)\n\r");
+  printf("LCD HT1623: PD3/PD2/PD1/PC6/PC7 (待 P2 接入)\n\r");
+  printf("Shell: 输入命令后回车（help 查看列表）\n\r");
   printf("========================================\n\r\n\r");
 
   /* Loop until the end of transmission */
@@ -480,9 +493,9 @@ static void Task_Encoder(void)
 
   prevAB = currAB;
 
-  /* Active-low key with debounce + short/long press events */
+  /* 新板按键高有效（外部下拉，按下=高）：读到高电平即按下，下面沿用 0=按下 的内部语义 */
   {
-    uint8_t keyRaw = (GPIO_ReadInputDataBit(EC11_GPIO_PORT, EC11_PIN_KEY) != Bit_RESET) ? 1U : 0U;
+    uint8_t keyRaw = (GPIO_ReadInputDataBit(EC11_GPIO_PORT, EC11_PIN_KEY) == Bit_RESET) ? 1U : 0U;
 
     if (keyRaw != keyStable)
     {
@@ -846,6 +859,7 @@ static void Cmd_Status(const char* args)
  */
 static void Task_TM1729(void)
 {
+#if (STEP1_UART_ONLY == 0U)
   uint16_t rpmToShow;
   memset(TM1729_BitBuf, 0, sizeof(TM1729_BitBuf));
 
@@ -855,6 +869,7 @@ static void Task_TM1729(void)
   TM1729_SetRpmIndicator(1U);
 
   TM1729_WriteBuffer();
+#endif /* STEP1_UART_ONLY */
 }
 
 /* RPM → 占空比(%) 查表线性插值（表值 ×10，插值后四舍五入） */
@@ -897,12 +912,17 @@ static uint8_t RpmToDutyPercent(uint16_t rpm)
  */
 static uint16_t GetTargetDutyPermille(void)
 {
+#if (STEP1_UART_ONLY == 1U)
+  /* STEP1：串口验证阶段，占空比强制为 0，电机不动作 */
+  return PWM_INACTIVE_PERMILLE;
+#else
   if (AppMode == APP_MODE_RUNNING)
   {
     uint8_t dutyPct = RpmToDutyPercent(MotorRpm);
     return (uint16_t)dutyPct * 10U;
   }
   return PWM_INACTIVE_PERMILLE;
+#endif /* STEP1_UART_ONLY */
 }
 
 /**
@@ -920,7 +940,7 @@ static const char* GetModeName(AppMode_t mode)
 }
 
 /**
-  * @brief  Configure EC11 pins on PC3/PC4/PC5 as pull-up inputs
+  * @brief  Configure EC11 pins on PC5/PC3/PC4 as pull-down inputs (active high, 新板)
   * @param  None
   * @retval None
   */
@@ -934,10 +954,11 @@ static void EC11_Config(void)
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
   GPIO_InitStructure.GPIO_Speed = GPIO_Speed_Level_2;
   GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
-  GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+  GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_DOWN;
   GPIO_Init(EC11_GPIO_PORT, &GPIO_InitStructure);
 }
 
+#if (STEP1_UART_ONLY == 0U)
 /**
  * @brief  TM1729 位操作短延时（软件空循环）
  * @param  None
@@ -1224,6 +1245,7 @@ static void TM1729_DemoUpdate(AppMode_t mode)
 
   TM1729_WriteBuffer();
 }
+#endif /* STEP1_UART_ONLY */
 
 /**
   * @brief  Configure the UART Device
@@ -1266,23 +1288,22 @@ static void TIM1_PWM_Config(void)
   RCC_APBPeriph2ClockCmd(RCC_APBPeriph2_TIM1, ENABLE);
   RCC_AHBPeriphClockCmd(RCC_AHBPeriph_GPIOD, ENABLE);
 
-#if defined(HK32F0301MF4P7C)
-  /* Ensure package pin mux routes TIM1_CH2 signal to PD2 */
-  GPIO_IOMUX_ChangePin(IOMUX_PIN11, IOMUX_PB5_SEL_PD2);
-#endif
+  /* New board (V1.0): TIM1_CH2 is natively on PD6 (TSSOP20 pin3), no IOMUX needed.
+     NOTE: the old IOMUX remap (PB5 position -> PD2) MUST be removed, otherwise
+     pin11 loses SWCLK and the debug port breaks. */
 
-  /* Configure PD2 as alternate function push-pull (TIM1_CH2) */
-  GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2;
+  /* Configure PD6 as alternate function push-pull (TIM1_CH2) */
+  GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;
   GPIO_InitStructure.GPIO_Speed = GPIO_Speed_Level_3;
   GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
   GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
   GPIO_Init(GPIOD, &GPIO_InitStructure);
 
-  /* Connect TIM1_CH2 to PD2 (AF3, per TIM1 mapping) */
-  GPIO_PinAFConfig(GPIOD, GPIO_PinSource2, GPIO_AF_3);
+  /* Connect TIM1_CH2 to PD6 (AF3, per TIM1 mapping) */
+  GPIO_PinAFConfig(GPIOD, GPIO_PinSource6, GPIO_AF_3);
 
-  /* Time base configuration for 17.57kHz PWM */
+  /* Time base configuration for 10kHz PWM */
   PWMPeriod = (uint16_t)((SystemCoreClock / PWM_TARGET_FREQ_HZ) - 1U);
   TIM_TimeBaseStructure.TIM_Period = PWMPeriod;
   TIM_TimeBaseStructure.TIM_Prescaler = 0;
