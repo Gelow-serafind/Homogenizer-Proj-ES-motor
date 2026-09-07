@@ -1,0 +1,8 @@
+/*
+* @file name: HK32F0301MxxxxC_Keil_Pack_Update_Version
+* @description: 本文件是用来描述HK32F0301MxxxxC系列芯片Keil器件库版本列表
+* @author: AE Team
+*/
+
+V1.0.23/2024-05-29
+1. 首次发布

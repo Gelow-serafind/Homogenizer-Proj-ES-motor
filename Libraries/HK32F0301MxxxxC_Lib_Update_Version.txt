@@ -1,0 +1,8 @@
+/*
+* @file name: HK32F0301MxxxxC_Lib_Update_Version
+* @description: 本文件是用来描述HK32F0301MxxxxC系列芯片函数库版本列表
+* @author: AE Team
+*/
+
+V1.0.5/2025-07-17
+1. 适配了HK 最新编程规范的函数库

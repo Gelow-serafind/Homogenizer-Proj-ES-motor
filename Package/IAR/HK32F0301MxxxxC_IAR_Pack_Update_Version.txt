@@ -1,0 +1,8 @@
+/*
+* @file name: HK32F0301MxxxxC_IAR_Pack_Update_Version
+* @description: 本文件是用来描述HK32F0301MxxxxC系列芯片IAR器件库版本列表
+* @author: AE Team
+*/
+
+V1.0.0/2025-05-23
+1. 首次发布
