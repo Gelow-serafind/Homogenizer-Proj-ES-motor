@@ -1,6 +1,6 @@
 /*******************************************************************************
 * @filename:  main.c
-* /
+*/
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -13,14 +13,14 @@
 /* Private macro -------------------------------------------------------------*/
 #define PWM_TARGET_FREQ_HZ 10000UL   /* 电机控制频率 10kHz（新板确认值） */
 
-/* 分步实施开关：STEP1 仅验证串口循环打印（屏蔽 LCD 驱动与电机占空比输出） */
-#define STEP1_UART_ONLY 1U
+/* 分步实施开关：电机占空比钳位（电机/新 LUT 未标定前保持 0，防止误动作） */
+#define MOTOR_DUTY_CLAMP 1U
 
 /* 任务周期（ms），可通过宏调整每个任务响应时间 */
 #define TASK_PERIOD_ENCODER_MS 2U
 #define TASK_PERIOD_APP_MS     10U
 #define TASK_PERIOD_PWM_MS     5U
-#define TASK_PERIOD_TM1729_MS  50U
+#define TASK_PERIOD_LCD_MS     50U
 #define TASK_PERIOD_UART_CMD_MS 2U
 
 /* 业务参数 */
@@ -38,76 +38,31 @@
 #define EC11_PIN_B GPIO_Pin_3
 #define EC11_PIN_KEY GPIO_Pin_4
 
-/* TM1729 (legacy wiring compatible with old project) */
-#define TM1729_GPIO_PORT      GPIOC
-#define TM1729_PIN_SCL        GPIO_Pin_6
-#define TM1729_PIN_SDA        GPIO_Pin_7
-#define TM1729_SLAVE_ADDRESS  0x7CU
-#define TM1729_ICSET          0xEAU
-#define TM1729_BLKCTL         0xF0U
-#define TM1729_DISCTL         0xA2U
-#define TM1729_MODESET        0xC8U
-#define TM1729_APCTL          0xFCU
-#define TM1729_ADSET          0x00U
-#define TM1729_LCD_BUF_LEN    14U
+/* HT1623 LCD 驱动（新板 V1.0 原理图，4 线串行接口） ---------------------------*/
+#define HT1623_GPIO_PORT    GPIOD
+#define HT1623_PIN_CS       GPIO_Pin_3   /* PD3 = MCU_LCD_CS_5V   */
+#define HT1623_PIN_RD       GPIO_Pin_2   /* PD2 = MCU_LCD_RD_5V（只写模式，常高） */
+#define HT1623_PIN_WR       GPIO_Pin_1   /* PD1 = MCU_LCD_WR_5V   */
+#define HT1623_PORT_DATA    GPIOC
+#define HT1623_PIN_DATA     GPIO_Pin_6   /* PC6 = MCU_LCD_DATA_5V */
+#define HT1623_PORT_IRQ     GPIOC
+#define HT1623_PIN_IRQ      GPIO_Pin_7   /* PC7 = MCU_LCD_IRQ_5V（本版不用） */
 
-#define TM1729_COM1 0U
-#define TM1729_COM2 1U
-#define TM1729_COM3 2U
-#define TM1729_COM4 3U
+/* 玻璃屏只用到 SEG0..SEG28（玻璃脚 9..37）。
+   HT1623 RAM 组织为 96×4 位：7 位地址，每地址 4 位数据（nibble）；
+   addr = SEG*2 + COM组偏移，D0=COM0/4，D1=COM1/5，D2=COM2/6，D3=COM3/7 */
+#define HT1623_SEG_COUNT    29U
+#define HT1623_RAM_NIBBLES  (HT1623_SEG_COUNT * 2U)  /* 58 */
 
-/* 根据用户提供的 LCD 真值表建立玻璃屏引脚映射：PIN5..PIN13 为 9 条 SEG 线 */
-#define TM1729_SEG_PIN5   0U
-#define TM1729_SEG_PIN6   4U
-#define TM1729_SEG_PIN7   8U
-#define TM1729_SEG_PIN8   12U
-#define TM1729_SEG_PIN9   16U
-#define TM1729_SEG_PIN10  20U
-#define TM1729_SEG_PIN11  24U
-#define TM1729_SEG_PIN12  28U
-#define TM1729_SEG_PIN13  32U
-
-#define LCD_1stNUM_a   (TM1729_SEG_PIN5 + TM1729_COM1)
-#define LCD_1stNUM_b   (TM1729_SEG_PIN6 + TM1729_COM1)
-#define LCD_1stNUM_c   (TM1729_SEG_PIN6 + TM1729_COM3)
-#define LCD_1stNUM_d   (TM1729_SEG_PIN5 + TM1729_COM4)
-#define LCD_1stNUM_e   (TM1729_SEG_PIN5 + TM1729_COM3)
-#define LCD_1stNUM_f   (TM1729_SEG_PIN5 + TM1729_COM2)
-#define LCD_1stNUM_g   (TM1729_SEG_PIN6 + TM1729_COM2)
-
-#define LCD_2ndNUM_a   (TM1729_SEG_PIN13 + TM1729_COM1)
-#define LCD_2ndNUM_b   (TM1729_SEG_PIN12 + TM1729_COM1)
-#define LCD_2ndNUM_c   (TM1729_SEG_PIN12 + TM1729_COM3)
-#define LCD_2ndNUM_d   (TM1729_SEG_PIN13 + TM1729_COM4)
-#define LCD_2ndNUM_e   (TM1729_SEG_PIN13 + TM1729_COM3)
-#define LCD_2ndNUM_f   (TM1729_SEG_PIN13 + TM1729_COM2)
-#define LCD_2ndNUM_g   (TM1729_SEG_PIN12 + TM1729_COM2)
-
-#define LCD_3ndNUM_a   (TM1729_SEG_PIN11 + TM1729_COM1)
-#define LCD_3ndNUM_b   (TM1729_SEG_PIN10 + TM1729_COM1)
-#define LCD_3ndNUM_c   (TM1729_SEG_PIN10 + TM1729_COM3)
-#define LCD_3ndNUM_d   (TM1729_SEG_PIN11 + TM1729_COM4)
-#define LCD_3ndNUM_e   (TM1729_SEG_PIN11 + TM1729_COM3)
-#define LCD_3ndNUM_f   (TM1729_SEG_PIN11 + TM1729_COM2)
-#define LCD_3ndNUM_g   (TM1729_SEG_PIN10 + TM1729_COM2)
-
-#define LCD_4ndNUM_a   (TM1729_SEG_PIN9 + TM1729_COM1)
-#define LCD_4ndNUM_b   (TM1729_SEG_PIN8 + TM1729_COM1)
-#define LCD_4ndNUM_c   (TM1729_SEG_PIN8 + TM1729_COM3)
-#define LCD_4ndNUM_d   (TM1729_SEG_PIN9 + TM1729_COM4)
-#define LCD_4ndNUM_e   (TM1729_SEG_PIN9 + TM1729_COM3)
-#define LCD_4ndNUM_f   (TM1729_SEG_PIN9 + TM1729_COM2)
-#define LCD_4ndNUM_g   (TM1729_SEG_PIN8 + TM1729_COM2)
-
-#define LCD_5thNUM_a   (TM1729_SEG_PIN7 + TM1729_COM1)
-#define LCD_5thNUM_b   (TM1729_SEG_PIN12 + TM1729_COM4)
-#define LCD_5thNUM_c   (TM1729_SEG_PIN8 + TM1729_COM4)
-#define LCD_5thNUM_d   (TM1729_SEG_PIN7 + TM1729_COM4)
-#define LCD_5thNUM_e   (TM1729_SEG_PIN7 + TM1729_COM3)
-#define LCD_5thNUM_f   (TM1729_SEG_PIN7 + TM1729_COM2)
-#define LCD_5thNUM_g   (TM1729_SEG_PIN10 + TM1729_COM4)
-
-#define LCD_RPM_S1     (TM1729_SEG_PIN6 + TM1729_COM4)
+/* HT1623 命令码（9 位命令码，官方数据手册 Rev 2.00）：
+   发送格式 = ID(100) + 命令码 9 位 + 末位 X（发 0），即先发 3 位 0x04，再发 cmd<<1 共 9 位。
+   无 BIAS 命令：HT1623 固定 1/4 偏压、1/8 占空比 */
+#define HT1623_CMD_SYS_DIS  0x00U   /* 100 0000-0000-X 关系统振荡器与 LCD 偏压 */
+#define HT1623_CMD_SYS_EN   0x01U   /* 100 0000-0001-X 开系统振荡器 */
+#define HT1623_CMD_LCD_OFF  0x02U   /* 100 0000-0010-X 关 LCD 显示 */
+#define HT1623_CMD_LCD_ON   0x03U   /* 100 0000-0011-X 开 LCD 显示 */
+#define HT1623_CMD_XTAL32K  0x1CU   /* 100 0001-11XX-X 外接 32.768kHz 晶振（板上 U46） */
+#define HT1623_CMD_RC32K    0x18U   /* 100 0001-10XX-X 内部 RC 32kHz（当前使用；待 U46 晶振补焊后切回 XTAL32K） */
 
 /* RPM → 占空比 线性回归：rpm = 206.22 * duty - 2604.31
    解出 duty% = (rpm * 100 + 260431) / 20622，0-100 钳位
@@ -221,56 +176,68 @@ static uint16_t MotorRpm = 0;     /* 实际输出转速（运行时平滑 ramp�
 static volatile uint16_t CurrentDutyPermille = 0U;
 static volatile uint8_t DutyChanged = 1U;
 
-#if (STEP1_UART_ONLY == 0U)
-/* TM1729 显示缓冲（STEP1 阶段不启用，P2 将整体替换为 HT1623 驱动） */
-static uint8_t TM1729_BitBuf[TM1729_LCD_BUF_LEN] = {0};
-static const uint8_t TM1729_NumModel[17] = {
-  0x3FU, 0x06U, 0x5BU, 0x4FU, 0x66U, 0x6DU, 0x7DU, 0x07U, 0x7FU, 0x6FU,
-  0x77U, 0x7CU, 0x39U, 0x5EU, 0x79U, 0x71U, 0x00U
+/* ====================== HT1623 显示缓冲与段位映射 ====================== */
+static uint8_t LcdRam[HT1623_RAM_NIBBLES] = {0};
+static volatile uint8_t LcdDirty = 0U;
+
+typedef struct {
+  uint8_t seg;   /* HT1623 SEG 编号 0..28 */
+  uint8_t com;   /* 玻璃 COM 编号 1..8（HT1623 COM0..COM7 → RAM 位 = com-1） */
+} LcdSeg_t;
+
+#define LSEG(s, c) { (uint8_t)(s), (uint8_t)(c) }
+
+/* 28 位数码管 × 7 段（顺序 a b c d e f g）
+   数据来源：LVD13083AVTP1 规格书第 3 页引脚表（玻璃脚 9..37 = SEG0..SEG28） */
+static const LcdSeg_t LcdDigitMap[28][7] = {
+  /*  1 */ { LSEG(0,1),  LSEG(1,2),  LSEG(1,4),  LSEG(0,4),  LSEG(0,3),  LSEG(0,2),  LSEG(1,3)  },
+  /*  2 */ { LSEG(2,1),  LSEG(3,2),  LSEG(3,4),  LSEG(2,4),  LSEG(2,3),  LSEG(2,2),  LSEG(3,3)  },
+  /*  3 */ { LSEG(4,1),  LSEG(5,2),  LSEG(5,4),  LSEG(4,4),  LSEG(4,3),  LSEG(4,2),  LSEG(5,3)  },
+  /*  4 */ { LSEG(6,1),  LSEG(7,2),  LSEG(7,4),  LSEG(6,4),  LSEG(6,3),  LSEG(6,2),  LSEG(7,3)  },
+  /*  5 */ { LSEG(0,5),  LSEG(1,6),  LSEG(1,8),  LSEG(0,8),  LSEG(0,7),  LSEG(0,6),  LSEG(1,7)  },
+  /*  6 */ { LSEG(2,5),  LSEG(3,5),  LSEG(3,7),  LSEG(2,8),  LSEG(2,7),  LSEG(2,6),  LSEG(3,6)  },
+  /*  7 */ { LSEG(4,5),  LSEG(5,5),  LSEG(5,7),  LSEG(4,8),  LSEG(4,7),  LSEG(4,6),  LSEG(5,6)  },
+  /*  8 */ { LSEG(6,5),  LSEG(7,5),  LSEG(7,7),  LSEG(6,8),  LSEG(6,7),  LSEG(6,6),  LSEG(7,6)  },
+  /*  9 */ { LSEG(20,5), LSEG(21,5), LSEG(21,7), LSEG(20,8), LSEG(20,7), LSEG(20,6), LSEG(21,6) },
+  /* 10 */ { LSEG(22,5), LSEG(23,5), LSEG(23,7), LSEG(22,8), LSEG(22,7), LSEG(22,6), LSEG(23,6) },
+  /* 11 */ { LSEG(24,5), LSEG(25,5), LSEG(25,7), LSEG(24,8), LSEG(24,7), LSEG(24,6), LSEG(25,6) },
+  /* 12 */ { LSEG(26,5), LSEG(27,5), LSEG(27,7), LSEG(26,8), LSEG(26,7), LSEG(26,6), LSEG(27,6) },
+  /* 13 */ { LSEG(8,6),  LSEG(9,6),  LSEG(9,8),  LSEG(8,4),  LSEG(8,8),  LSEG(8,7),  LSEG(9,7)  },
+  /* 14 */ { LSEG(10,6), LSEG(11,6), LSEG(11,8), LSEG(10,4), LSEG(10,8), LSEG(10,7), LSEG(11,7) },
+  /* 15 */ { LSEG(12,5), LSEG(13,6), LSEG(13,8), LSEG(12,8), LSEG(12,7), LSEG(12,6), LSEG(13,7) },
+  /* 16 */ { LSEG(14,5), LSEG(15,5), LSEG(15,7), LSEG(14,8), LSEG(14,7), LSEG(14,6), LSEG(15,6) },
+  /* 17 */ { LSEG(9,4),  LSEG(9,3),  LSEG(9,2),  LSEG(9,1),  LSEG(8,1),  LSEG(8,3),  LSEG(8,2)  },
+  /* 18 */ { LSEG(11,4), LSEG(11,3), LSEG(11,2), LSEG(11,1), LSEG(10,1), LSEG(10,3), LSEG(10,2) },
+  /* 19 */ { LSEG(13,4), LSEG(13,3), LSEG(13,2), LSEG(13,1), LSEG(12,1), LSEG(12,3), LSEG(12,2) },
+  /* 20 */ { LSEG(14,4), LSEG(15,4), LSEG(15,2), LSEG(14,1), LSEG(14,2), LSEG(14,3), LSEG(15,3) },
+  /* 21 */ { LSEG(16,5), LSEG(17,6), LSEG(17,8), LSEG(16,8), LSEG(16,7), LSEG(16,6), LSEG(17,7) },
+  /* 22 */ { LSEG(18,5), LSEG(19,5), LSEG(19,7), LSEG(18,8), LSEG(18,7), LSEG(18,6), LSEG(19,6) },
+  /* 23 */ { LSEG(19,1), LSEG(18,2), LSEG(18,4), LSEG(19,4), LSEG(19,3), LSEG(19,2), LSEG(18,3) },
+  /* 24 */ { LSEG(17,1), LSEG(16,1), LSEG(16,3), LSEG(17,4), LSEG(17,3), LSEG(17,2), LSEG(16,2) },
+  /* 25 */ { LSEG(20,4), LSEG(21,3), LSEG(21,1), LSEG(20,1), LSEG(20,2), LSEG(20,3), LSEG(21,2) },
+  /* 26 */ { LSEG(22,4), LSEG(23,3), LSEG(23,1), LSEG(22,1), LSEG(22,2), LSEG(22,3), LSEG(23,2) },
+  /* 27 */ { LSEG(24,4), LSEG(25,4), LSEG(25,2), LSEG(24,1), LSEG(24,2), LSEG(24,3), LSEG(25,3) },
+  /* 28 */ { LSEG(26,4), LSEG(27,4), LSEG(27,2), LSEG(26,1), LSEG(26,2), LSEG(26,3), LSEG(27,3) },
 };
-const unsigned char LCD_NumPos[] =
-{
-  LCD_1stNUM_a,
-  LCD_1stNUM_b,
-  LCD_1stNUM_c,
-  LCD_1stNUM_d,
-  LCD_1stNUM_e,
-  LCD_1stNUM_f,
-  LCD_1stNUM_g,
 
-  LCD_2ndNUM_a,
-  LCD_2ndNUM_b,
-  LCD_2ndNUM_c,
-  LCD_2ndNUM_d,
-  LCD_2ndNUM_e,
-  LCD_2ndNUM_f,
-  LCD_2ndNUM_g,
-
-  LCD_3ndNUM_a,
-  LCD_3ndNUM_b,
-  LCD_3ndNUM_c,
-  LCD_3ndNUM_d,
-  LCD_3ndNUM_e,
-  LCD_3ndNUM_f,
-  LCD_3ndNUM_g,
-
-  LCD_4ndNUM_a,
-  LCD_4ndNUM_b,
-  LCD_4ndNUM_c,
-  LCD_4ndNUM_d,
-  LCD_4ndNUM_e,
-  LCD_4ndNUM_f,
-  LCD_4ndNUM_g,
-
-  LCD_5thNUM_a,
-  LCD_5thNUM_b,
-  LCD_5thNUM_c,
-  LCD_5thNUM_d,
-  LCD_5thNUM_e,
-  LCD_5thNUM_f,
-  LCD_5thNUM_g,
+/* 图标段位表：S1..S30（十字架/时钟/感叹号/圆/向上/Rpm/°C/H/m/s/---- 等，具体对应待单点测试确认） */
+static const LcdSeg_t LcdIconMap[30] = {
+  /* S1  */ LSEG(1,1),   /* S2  */ LSEG(3,1),   /* S3  */ LSEG(5,1),
+  /* S4  */ LSEG(28,2),  /* S5  */ LSEG(7,1),   /* S6  */ LSEG(1,5),
+  /* S7  */ LSEG(7,8),   /* S8  */ LSEG(23,8),  /* S9  */ LSEG(27,8),
+  /* S10 */ LSEG(3,8),   /* S11 */ LSEG(5,8),   /* S12 */ LSEG(9,5),
+  /* S13 */ LSEG(10,5),  /* S14 */ LSEG(11,5),  /* S15 */ LSEG(13,5),
+  /* S16 */ LSEG(21,8),  /* S17 */ LSEG(23,4),  /* S18 */ LSEG(25,8),
+  /* S19 */ LSEG(28,3),  /* S20 */ LSEG(8,5),   /* S21 */ LSEG(15,8),
+  /* S22 */ LSEG(12,4),  /* S23 */ LSEG(15,1),  /* S24 */ LSEG(19,8),
+  /* S25 */ LSEG(16,4),  /* S26 */ LSEG(21,4),  /* S27 */ LSEG(28,4),
+  /* S28 */ LSEG(25,1),  /* S29 */ LSEG(27,1),  /* S30 */ LSEG(28,1),
 };
-#endif /* STEP1_UART_ONLY */
+
+/* 数字字模：bit0=a ... bit6=g；索引 10 = 全灭（消隐） */
+static const uint8_t LcdDigitFont[11] = {
+  0x3FU, 0x06U, 0x5BU, 0x4FU, 0x66U, 0x6DU, 0x7DU, 0x07U, 0x7FU, 0x6FU, 0x00U
+};
 
 /* UART 命令输入系统 ---------------------------------------------------------*/
 #define UART_RX_RING_SIZE  64U
@@ -295,6 +262,7 @@ static void Cmd_SetSpeed(const char* args);
 static void Cmd_Start(const char* args);
 static void Cmd_Pause(const char* args);
 static void Cmd_Status(const char* args);
+static void Cmd_Lcd(const char* args);
 
 /* 指令表：添加新指令只需在此增加 { "name", CallbackFn } 项 */
 static const CmdEntry_t cmdTable[] = {
@@ -304,6 +272,7 @@ static const CmdEntry_t cmdTable[] = {
   { "start",  Cmd_Start  },
   { "pause",  Cmd_Pause  },
   { "status", Cmd_Status },
+  { "lcd",    Cmd_Lcd    },
   { NULL,     NULL       }
 };
 
@@ -311,10 +280,7 @@ static const CmdEntry_t cmdTable[] = {
 static void UART_Config(void);
 static void TIM1_PWM_Config(void);
 static void TIM1_SetDutyPermille(uint16_t dutyPermille);
-#if (STEP1_UART_ONLY == 0U)
-static void TM1729_Init(void);
-static void TM1729_DemoUpdate(AppMode_t mode);
-#endif /* STEP1_UART_ONLY */
+static void HT1623_Init(void);
 
 static void EC11_Config(void);
 
@@ -322,7 +288,7 @@ static void EC11_Config(void);
 static void Task_Encoder(void);
 static void Task_App(void);
 static void Task_PWM(void);
-static void Task_TM1729(void);
+static void Task_LCD(void);
 static void Task_UartCmd(void);
 
 /* 业务辅助函数 */
@@ -332,20 +298,16 @@ static const char* GetModeName(AppMode_t mode);
 static uint16_t LoadLastRpm(void);
 static void SaveRpmToFlash(uint16_t rpm);
 
-#if (STEP1_UART_ONLY == 0U)
-static void TM1729_ShortDelay(void);
-static void TM1729_Start(void);
-static void TM1729_Stop(void);
-static void TM1729_SendByte(uint8_t dat);
-static void TM1729_SetBit(uint8_t bit);
-static void TM1729_ClrBit(uint8_t bit);
-static void TM1729_SetNumAt(uint8_t idx, uint8_t num);
-static void TM1729_Show4Digits(uint8_t d3, uint8_t d2, uint8_t d1, uint8_t d0);
-static void TM1729_SetRpmIndicator(uint8_t enable);
-static void TM1729_ShowValueOnRange(uint16_t value, uint8_t firstIdx, uint8_t lastIdx);
-static void TM1729_WriteBuffer(void);
-static void TM1729_PortInit(void);
-#endif /* STEP1_UART_ONLY */
+/* HT1623 驱动与显示层 */
+static void HT1623_Delay(void);
+static void HT1623_PortInit(void);
+static void HT1623_SendBits(uint16_t bits, uint8_t nbits);
+static void HT1623_SendCmd(uint8_t cmd);
+static void HT1623_WriteRam(uint8_t startAddr, const uint8_t* buf, uint8_t len);
+static void Lcd_All(uint8_t on);
+static void Lcd_SetSegment(uint8_t seg, uint8_t com, uint8_t on);
+static void Lcd_ShowDigit(uint8_t digit, uint8_t num);
+static void Lcd_SetIcon(uint8_t icon, uint8_t on);
 
 /* 任务调度结构 */
 typedef void (*TaskHandler_t)(void);
@@ -360,7 +322,7 @@ static Task_t tasks[] = {
   { TASK_PERIOD_UART_CMD_MS,  0, Task_UartCmd  },
   { TASK_PERIOD_APP_MS,       0, Task_App      },
   { TASK_PERIOD_PWM_MS,       0, Task_PWM      },
-  { TASK_PERIOD_TM1729_MS,    0, Task_TM1729   },
+  { TASK_PERIOD_LCD_MS,       0, Task_LCD      },
 };
 
 #define TASKS_COUNT (sizeof(tasks)/sizeof(tasks[0]))
@@ -387,10 +349,11 @@ int main(void)
   TIM1_PWM_Config();
   /* EC11 GPIO配置 */
   EC11_Config();
-#if (STEP1_UART_ONLY == 0U)
-  /* TM1729 屏幕配置（复用老项目接线与时序，STEP1 不启用） */
-  TM1729_Init();
-#endif /* STEP1_UART_ONLY */
+
+  /* HT1623 屏幕配置（新板 4 线串行接口） */
+  HT1623_Init();
+  /* 上电全亮测试：验证整屏点亮与对比度，后续用 lcd 命令逐点测试 */
+  Lcd_All(1U);
 
   /* Configure SysTick Timer for 1ms interrupts */
   if (SysTick_Config(SystemCoreClock / 1000))
@@ -403,15 +366,8 @@ int main(void)
   ConfigRpm = LoadLastRpm();
   FlashLastSavedRpm = ConfigRpm;
 
-  printf("\n\r========================================\n\r");
-  printf("HK32F0301MxxxxC Homogenizer Demo (STEP1)\n\r");
-  printf("========================================\n\r");
-  printf("UART1: 115200 baud, 8N1 (TX=PD4, RX=PB4)\n\r");
-  printf("TIM1 PWM: 10kHz, PD6 pin (CH2)\n\r");
-  printf("EC11 A/B/KEY: PC5/PC3/PC4 (active high)\n\r");
-  printf("KEY Start/Stop: PA2/PD7 (active low)\n\r");
-  printf("LCD HT1623: PD3/PD2/PD1/PC6/PC7 (待 P2 接入)\n\r");
-  printf("Shell: 输入命令后回车（help 查看列表）\n\r");
+  printf("\n\r===== Homogenizer Controller =====\n\r");
+  printf("HK32F0301MxxxxC shell ready, type 'help'\n\r");
   printf("========================================\n\r\n\r");
 
   /* Loop until the end of transmission */
@@ -550,22 +506,15 @@ static void Task_Encoder(void)
 static void Task_App(void)
 {
   int8_t delta = 0;
-  int32_t encPos = 0;
   uint8_t longEvt = 0U;
 
   __disable_irq();
   delta = EncDeltaPending;
   EncDeltaPending = 0;
-  encPos = EncoderPosition;
   KeyShortPressEvent = 0U;
   longEvt = KeyLongPressEvent;
   KeyLongPressEvent = 0U;
   __enable_irq();
-
-  if (delta != 0)
-  {
-    printf("\r\nhomogenizer > Knob cnt: %ld\r\nhomogenizer > ", (long)encPos);
-  }
 
   /* 长按：运行/停止切换 */
   if (longEvt != 0U)
@@ -851,25 +800,82 @@ static void Cmd_Status(const char* args)
          (unsigned)dutyPct);
 }
 
-/* TM1729 显示任务：50ms 刷新一次显示缓冲 */
 /**
- * @brief  TM1729 LCD 显示任务：50ms 周期刷新显示缓冲（停止时显示目标转速，运行时显示实际转速）
+ * @brief  LCD 命令：lcd all | lcd off | lcd d1-28 | lcd s1-30
+ *         all=全亮（点亮测试），off=全灭，d<n>=第 n 位数码位置显示 8，
+ *         s<n>=点亮第 n 个图标（用于核对位置/图标映射）
+ * @param  args: 子命令字符串
+ * @return None
+ */
+static void Cmd_Lcd(const char* args)
+{
+  int val = 0;
+  const char* p;
+
+  while (*args == ' ') args++;
+
+  if (strncmp(args, "all", 3U) == 0)
+  {
+    Lcd_All(1U);
+    printf("\r\nLCD: all segments on\r\n");
+    return;
+  }
+
+  if (strncmp(args, "off", 3U) == 0)
+  {
+    Lcd_All(0U);
+    printf("\r\nLCD: all segments off\r\n");
+    return;
+  }
+
+  if ((args[0] == 'd' || args[0] == 'D'))
+  {
+    p = args + 1;
+    while (*p == ' ') p++;
+    while (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); p++; }
+    if (val < 1 || val > 28)
+    {
+      printf("\r\nLCD: digit out of range 1-28\r\n");
+      return;
+    }
+    Lcd_All(0U);
+    Lcd_ShowDigit((uint8_t)val, 8U);
+    printf("\r\nLCD: digit %d = 8\r\n", val);
+    return;
+  }
+
+  if ((args[0] == 's' || args[0] == 'S'))
+  {
+    p = args + 1;
+    while (*p == ' ') p++;
+    while (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); p++; }
+    if (val < 1 || val > 30)
+    {
+      printf("\r\nLCD: icon out of range 1-30\r\n");
+      return;
+    }
+    Lcd_All(0U);
+    Lcd_SetIcon((uint8_t)val, 1U);
+    printf("\r\nLCD: icon S%d on\r\n", val);
+    return;
+  }
+
+  printf("\r\nLCD usage: lcd all | lcd off | lcd d1-28 | lcd s1-30\r\n");
+}
+
+/* LCD 显示任务：50ms 检查脏标记，按需写入 HT1623 RAM */
+/**
+ * @brief  HT1623 LCD 显示任务：仅当显示缓冲变更时全量写入（29 字节）
  * @param  None
  * @return None
  */
-static void Task_TM1729(void)
+static void Task_LCD(void)
 {
-#if (STEP1_UART_ONLY == 0U)
-  uint16_t rpmToShow;
-  memset(TM1729_BitBuf, 0, sizeof(TM1729_BitBuf));
-
-  /* 停止时显示目标转速，运行时显示实际输出转速 */
-  rpmToShow = (AppMode == APP_MODE_RUNNING) ? MotorRpm : ConfigRpm;
-  TM1729_ShowValueOnRange(rpmToShow, 0U, 4U);
-  TM1729_SetRpmIndicator(1U);
-
-  TM1729_WriteBuffer();
-#endif /* STEP1_UART_ONLY */
+  if (LcdDirty != 0U)
+  {
+    HT1623_WriteRam(0U, LcdRam, HT1623_RAM_NIBBLES);
+    LcdDirty = 0U;
+  }
 }
 
 /* RPM → 占空比(%) 查表线性插值（表值 ×10，插值后四舍五入） */
@@ -912,8 +918,8 @@ static uint8_t RpmToDutyPercent(uint16_t rpm)
  */
 static uint16_t GetTargetDutyPermille(void)
 {
-#if (STEP1_UART_ONLY == 1U)
-  /* STEP1：串口验证阶段，占空比强制为 0，电机不动作 */
+#if (MOTOR_DUTY_CLAMP == 1U)
+  /* 电机/新 LUT 未标定前占空比强制为 0，电机不动作 */
   return PWM_INACTIVE_PERMILLE;
 #else
   if (AppMode == APP_MODE_RUNNING)
@@ -922,7 +928,7 @@ static uint16_t GetTargetDutyPermille(void)
     return (uint16_t)dutyPct * 10U;
   }
   return PWM_INACTIVE_PERMILLE;
-#endif /* STEP1_UART_ONLY */
+#endif /* MOTOR_DUTY_CLAMP */
 }
 
 /**
@@ -958,294 +964,248 @@ static void EC11_Config(void)
   GPIO_Init(EC11_GPIO_PORT, &GPIO_InitStructure);
 }
 
-#if (STEP1_UART_ONLY == 0U)
+/* ====================== HT1623 驱动实现 ====================== */
+
 /**
- * @brief  TM1729 位操作短延时（软件空循环）
+ * @brief  HT1623 位操作延时（@48MHz 约 8µs，WR 半周期；时钟频率 ~60kHz，满足 4~300kHz 与脉宽≥1.67µs）
  * @param  None
  * @return None
  */
-static void TM1729_ShortDelay(void)
+static void HT1623_Delay(void)
 {
-  for (volatile uint32_t i = 0; i < 32U; ++i)
+  for (volatile uint32_t i = 0; i < 96U; ++i)
   {
   }
 }
 
 /**
- * @brief  TM1729 I2C 类通信起始条件：SCL 高时 SDA 下降沿
+ * @brief  HT1623 通信 GPIO 初始化：PD3=CS, PD2=RD, PD1=WR, PC6=DATA 推挽输出；
+ *         CS 空闲高（低有效片选），RD 常高（只写模式），WR 空闲高。PC7=IRQ 不用
  * @param  None
  * @return None
  */
-static void TM1729_Start(void)
-{
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SDA, Bit_SET);
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SCL, Bit_SET);
-  TM1729_ShortDelay();
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SDA, Bit_RESET);
-  TM1729_ShortDelay();
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SCL, Bit_RESET);
-}
-
-/**
- * @brief  TM1729 I2C 类通信停止条件：SCL 高时 SDA 上升沿
- * @param  None
- * @return None
- */
-static void TM1729_Stop(void)
-{
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SCL, Bit_SET);
-  TM1729_ShortDelay();
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SDA, Bit_RESET);
-  TM1729_ShortDelay();
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SDA, Bit_SET);
-  TM1729_ShortDelay();
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SCL, Bit_RESET);
-}
-
-/**
- * @brief  向 TM1729 发送一个字节（位操作模拟串行时序，MSB 优先）
- * @param  dat: 待发送的字节
- * @return None
- */
-static void TM1729_SendByte(uint8_t dat)
-{
-  for (uint8_t i = 0U; i < 8U; ++i)
-  {
-    GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SCL, Bit_RESET);
-    if ((dat & 0x80U) != 0U)
-    {
-      GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SDA, Bit_SET);
-    }
-    else
-    {
-      GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SDA, Bit_RESET);
-    }
-    TM1729_ShortDelay();
-    GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SCL, Bit_SET);
-    TM1729_ShortDelay();
-    dat <<= 1;
-  }
-
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SCL, Bit_RESET);
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SDA, Bit_RESET);
-  TM1729_ShortDelay();
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SCL, Bit_SET);
-  TM1729_ShortDelay();
-  GPIO_WriteBit(TM1729_GPIO_PORT, TM1729_PIN_SCL, Bit_RESET);
-}
-
-/**
- * @brief  设置 TM1729 显示缓冲中的指定位
- * @param  bit: 位编号（0-34，对应 LCD_NumPos 中的位位置）
- * @return None
- */
-static void TM1729_SetBit(uint8_t bit)
-{
-  uint8_t tmp = (uint8_t)(7U - (bit % 8U));
-  TM1729_BitBuf[bit / 8U] |= (uint8_t)(1U << tmp);
-}
-
-/**
- * @brief  清除 TM1729 显示缓冲中的指定位
- * @param  bit: 位编号（0-34，对应 LCD_NumPos 中的位位置）
- * @return None
- */
-static void TM1729_ClrBit(uint8_t bit)
-{
-  uint8_t tmp = (uint8_t)(7U - (bit % 8U));
-  TM1729_BitBuf[bit / 8U] &= (uint8_t)(~(1U << tmp));
-}
-
-/**
- * @brief  在 TM1729 显示缓冲的指定数码管位置设置数字
- * @param  idx: 数码管索引（0-4）
- * @param  num: 要显示的数字（0-9），16 为空白
- * @return None
- */
-static void TM1729_SetNumAt(uint8_t idx, uint8_t num)
-{
-  uint8_t seg = TM1729_NumModel[(num <= 16U) ? num : 16U];
-
-  if (idx >= 5U)
-  {
-    return;
-  }
-
-  for (uint8_t i = 0U; i < 7U; ++i)
-  {
-    if ((seg & 0x01U) != 0U)
-    {
-      TM1729_SetBit(LCD_NumPos[(idx * 7U) + i]);
-    }
-    else
-    {
-      TM1729_ClrBit(LCD_NumPos[(idx * 7U) + i]);
-    }
-    seg >>= 1;
-  }
-}
-
-/**
- * @brief  在 LCD 上显示 4 位数字（清除缓冲后写入）
- * @param  d3: 千位数字
- * @param  d2: 百位数字
- * @param  d1: 十位数字
- * @param  d0: 个位数字
- * @return None
- */
-static void TM1729_Show4Digits(uint8_t d3, uint8_t d2, uint8_t d1, uint8_t d0)
-{
-  memset(TM1729_BitBuf, 0, sizeof(TM1729_BitBuf));
-
-  TM1729_SetNumAt(0U, d3);
-  TM1729_SetNumAt(1U, d2);
-  TM1729_SetNumAt(2U, d1);
-  TM1729_SetNumAt(3U, d0);
-}
-
-/**
- * @brief  控制 LCD 上 RPM 单位指示段的显示/隐藏
- * @param  enable: 非 0 显示，0 隐藏
- * @return None
- */
-static void TM1729_SetRpmIndicator(uint8_t enable)
-{
-  if (enable != 0U)
-  {
-    TM1729_SetBit(LCD_RPM_S1);
-  }
-  else
-  {
-    TM1729_ClrBit(LCD_RPM_S1);
-  }
-}
-
-/**
- * @brief  在 LCD 指定数码管范围内显示数值（右对齐，高位消隐）
- * @param  value: 待显示数值
- * @param  firstIdx: 起始数码管索引（0-4）
- * @param  lastIdx: 结束数码管索引（0-4，需 >= firstIdx）
- * @return None
- */
-static void TM1729_ShowValueOnRange(uint16_t value, uint8_t firstIdx, uint8_t lastIdx)
-{
-  uint8_t i;
-  uint8_t hasOutput = 0U;
-
-  if ((firstIdx >= 5U) || (lastIdx >= 5U) || (firstIdx > lastIdx))
-  {
-    return;
-  }
-
-  for (i = firstIdx; i <= lastIdx; ++i)
-  {
-    TM1729_SetNumAt(i, 16U);
-  }
-
-  for (i = lastIdx; ; --i)
-  {
-    if ((value == 0U) && (hasOutput != 0U))
-    {
-      break;
-    }
-
-    TM1729_SetNumAt(i, (uint8_t)(value % 10U));
-    value /= 10U;
-    hasOutput = 1U;
-
-    if (i == firstIdx)
-    {
-      break;
-    }
-  }
-}
-
-/**
- * @brief  将显示缓冲通过 TM1729 写入 LCD 硬件
- * @param  None
- * @return None
- */
-static void TM1729_WriteBuffer(void)
-{
-  TM1729_Start();
-  TM1729_SendByte(TM1729_SLAVE_ADDRESS);
-  TM1729_SendByte(TM1729_ADSET);
-  for (uint8_t i = 0U; i < TM1729_LCD_BUF_LEN; ++i)
-  {
-    TM1729_SendByte(TM1729_BitBuf[i]);
-  }
-  TM1729_Stop();
-}
-
-/**
- * @brief  初始化 TM1729 通信 GPIO 引脚（PC6/PC7 推挽输出）
- * @param  None
- * @return None
- */
-static void TM1729_PortInit(void)
+static void HT1623_PortInit(void)
 {
   GPIO_InitTypeDef GPIO_InitStructure;
 
+  RCC_AHBPeriphClockCmd(RCC_AHBPeriph_GPIOD, ENABLE);
   RCC_AHBPeriphClockCmd(RCC_AHBPeriph_GPIOC, ENABLE);
 
-  GPIO_InitStructure.GPIO_Pin = TM1729_PIN_SCL | TM1729_PIN_SDA;
+  GPIO_InitStructure.GPIO_Pin = HT1623_PIN_CS | HT1623_PIN_RD | HT1623_PIN_WR;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
   GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
   GPIO_InitStructure.GPIO_Speed = GPIO_Speed_Level_2;
-  GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
-  GPIO_Init(TM1729_GPIO_PORT, &GPIO_InitStructure);
+  GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
+  GPIO_Init(HT1623_GPIO_PORT, &GPIO_InitStructure);
+
+  GPIO_InitStructure.GPIO_Pin = HT1623_PIN_DATA;
+  GPIO_Init(HT1623_PORT_DATA, &GPIO_InitStructure);
+
+  /* 初始空闲电平 */
+  GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_CS, Bit_SET);
+  GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_RD, Bit_SET);
+  GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_WR, Bit_SET);
+  GPIO_WriteBit(HT1623_PORT_DATA, HT1623_PIN_DATA, Bit_RESET);
 }
 
 /**
- * @brief  TM1729 LCD 驱动初始化：GPIO 配置、发送 IC 设置指令、显示测试图案
+ * @brief  按 MSB 优先发送 nbits 位（数据在 WR 上升沿被锁存）
+ * @param  bits: 位序列（3 位 ID、9 位命令码或 7 位地址）
+ * @param  nbits: 位长
+ * @return None
+ */
+static void HT1623_SendBits(uint16_t bits, uint8_t nbits)
+{
+  uint16_t mask = (uint16_t)(1U << (nbits - 1U));
+
+  while (nbits-- != 0U)
+  {
+    if ((bits & mask) != 0U)
+    {
+      GPIO_WriteBit(HT1623_PORT_DATA, HT1623_PIN_DATA, Bit_SET);
+    }
+    else
+    {
+      GPIO_WriteBit(HT1623_PORT_DATA, HT1623_PIN_DATA, Bit_RESET);
+    }
+    GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_WR, Bit_RESET);
+    HT1623_Delay();
+    GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_WR, Bit_SET);
+    HT1623_Delay();
+    mask >>= 1;
+  }
+}
+
+/**
+ * @brief  发送命令：CS=0 → ID(100,3位) → 命令码 9 位（末位 X=0）→ CS=1
+ * @param  cmd: 9 位命令码（见 HT1623_CMD_* 宏）
+ * @return None
+ */
+static void HT1623_SendCmd(uint8_t cmd)
+{
+  GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_CS, Bit_RESET);
+  HT1623_SendBits(0x04U, 3U);                      /* ID = 100（命令模式） */
+  HT1623_SendBits((uint16_t)(cmd << 1), 9U);       /* 命令码 9 位，末位 X=0 */
+  GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_CS, Bit_SET);
+  HT1623_Delay();                                  /* CS 高电平≥tCS(700ns)，复位串行接口 */
+  HT1623_Delay();
+  HT1623_Delay();
+}
+
+/**
+ * @brief  发送一个 nibble（4 位 RAM 数据），D0 先发（数据手册 WRITE: ...A6..A0 D0D1D2D3）
+ * @param  nib: 低 4 位有效
+ * @return None
+ */
+static void HT1623_SendNibble(uint8_t nib)
+{
+  for (uint8_t i = 0U; i < 4U; i++)
+  {
+    if (((nib >> i) & 1U) != 0U)
+    {
+      GPIO_WriteBit(HT1623_PORT_DATA, HT1623_PIN_DATA, Bit_SET);
+    }
+    else
+    {
+      GPIO_WriteBit(HT1623_PORT_DATA, HT1623_PIN_DATA, Bit_RESET);
+    }
+    GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_WR, Bit_RESET);
+    HT1623_Delay();
+    GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_WR, Bit_SET);
+    HT1623_Delay();
+  }
+}
+
+/**
+ * @brief  写 RAM：CS=0 → ID(101,3位) → 7 位起始地址 → 连续写 nibble（地址自动递增）→ CS=1
+ * @param  startAddr: 起始 nibble 地址（0..95）
+ * @param  buf: 数据缓冲（每元素低 4 位有效）
+ * @param  len: nibble 个数
+ * @return None
+ */
+static void HT1623_WriteRam(uint8_t startAddr, const uint8_t* buf, uint8_t len)
+{
+  GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_CS, Bit_RESET);
+  HT1623_SendBits(0x05U, 3U);                      /* ID = 101（写模式） */
+  HT1623_SendBits((uint16_t)startAddr, 7U);        /* 7 位地址 A6..A0 */
+  while (len-- != 0U)
+  {
+    HT1623_SendNibble(*buf++);
+  }
+  GPIO_WriteBit(HT1623_GPIO_PORT, HT1623_PIN_CS, Bit_SET);
+  HT1623_Delay();                                  /* CS 高电平≥tCS(700ns)，复位串行接口 */
+  HT1623_Delay();
+  HT1623_Delay();
+}
+
+/**
+ * @brief  HT1623 初始化：清 RAM → 选外接 32.768kHz 晶振 → 开系统 → 开显示
+ *         （HT1623 固定 1/4 偏压 1/8 占空比，无需 BIAS 命令；外部时钟源下 SYS DIS 无效）
  * @param  None
  * @return None
  */
-static void TM1729_Init(void)
+static void HT1623_Init(void)
 {
-  TM1729_PortInit();
+  HT1623_PortInit();
 
-  TM1729_Stop();
-  TM1729_Start();
-  TM1729_SendByte(TM1729_SLAVE_ADDRESS);
-  TM1729_SendByte(TM1729_ICSET);
-  TM1729_SendByte(TM1729_DISCTL);
-  TM1729_SendByte(TM1729_BLKCTL);
-  TM1729_SendByte(TM1729_APCTL);
-  TM1729_SendByte(TM1729_MODESET);
-  TM1729_Stop();
+  Lcd_All(0U);
+  HT1623_WriteRam(0U, LcdRam, HT1623_RAM_NIBBLES);
 
-  /* 上电先显示固定测试内容 */
-  memset(TM1729_BitBuf, 0, sizeof(TM1729_BitBuf));
-  TM1729_SetNumAt(0U, 1U);
-  TM1729_SetNumAt(1U, 2U);
-  TM1729_SetNumAt(2U, 3U);
-  TM1729_SetNumAt(3U, 4U);
-  TM1729_SetNumAt(4U, 16U);
-  TM1729_SetRpmIndicator(1U);
-  TM1729_WriteBuffer();
+  HT1623_SendCmd(HT1623_CMD_RC32K);    /* 内部 RC 32kHz（调试：若外接晶振 U46 不起振，扫描会冻结在 COM0，仅 COM1 行可显示） */
+  HT1623_SendCmd(HT1623_CMD_SYS_EN);    /* 开系统振荡器 */
+  HT1623_SendCmd(HT1623_CMD_LCD_ON);    /* 开显示 */
+}
+
+/* ====================== 显示层 API ====================== */
+
+/**
+ * @brief  全屏开/关（含未使用段位，用于点亮测试）
+ * @param  on: 1=全亮，0=全灭
+ * @return None
+ */
+static void Lcd_All(uint8_t on)
+{
+  memset(LcdRam, (on != 0U) ? 0x0FU : 0x00U, HT1623_RAM_NIBBLES);
+  LcdDirty = 1U;
 }
 
 /**
- * @brief  LCD 演示更新：停止时显示 1111，运行时显示 3333
- * @param  mode: 应用模式
+ * @brief  设置单个段位（SEG × COM 交点）
+ * @param  seg: SEG 编号 0..28
+ * @param  com: 玻璃 COM 编号 1..8（对应 HT1623 COM0..COM7）
+ * @param  on: 1=亮，0=灭
  * @return None
  */
-static void TM1729_DemoUpdate(AppMode_t mode)
+static void Lcd_SetSegment(uint8_t seg, uint8_t com, uint8_t on)
 {
-  /* 状态机演示码：STOPPED/RUNNING -> 1111/3333 */
-  if (mode == APP_MODE_RUNNING)
+  uint8_t comIdx;
+  uint8_t addr;
+  uint8_t bit;
+
+  if ((seg >= HT1623_SEG_COUNT) || (com < 1U) || (com > 8U))
   {
-    TM1729_Show4Digits(3U, 3U, 3U, 3U);
+    return;
+  }
+
+  /* RAM nibble 地址：SEG*2 + COM高组偏移；位：COM0-3 → bit0-3，COM4-7 → bit0-3 */
+  comIdx = (uint8_t)(com - 1U);
+  addr = (uint8_t)(seg * 2U + comIdx / 4U);
+  bit = comIdx & 3U;
+
+  if (on != 0U)
+  {
+    LcdRam[addr] |= (uint8_t)(1U << bit);
   }
   else
   {
-    TM1729_Show4Digits(1U, 1U, 1U, 1U);
+    LcdRam[addr] &= (uint8_t)~(1U << bit);
   }
-
-  TM1729_WriteBuffer();
+  LcdDirty = 1U;
 }
-#endif /* STEP1_UART_ONLY */
+
+/**
+ * @brief  在指定数码管位置显示数字
+ * @param  digit: 1..28
+ * @param  num: 0-9，10=消隐
+ * @return None
+ */
+static void Lcd_ShowDigit(uint8_t digit, uint8_t num)
+{
+  uint8_t segBits;
+  uint8_t s;
+
+  if ((digit < 1U) || (digit > 28U))
+  {
+    return;
+  }
+  if (num > 10U)
+  {
+    num = 10U;
+  }
+  segBits = LcdDigitFont[num];
+
+  for (s = 0U; s < 7U; s++)
+  {
+    Lcd_SetSegment(LcdDigitMap[digit - 1U][s].seg,
+                   LcdDigitMap[digit - 1U][s].com,
+                   ((segBits & (uint8_t)(1U << s)) != 0U) ? 1U : 0U);
+  }
+}
+
+/**
+ * @brief  控制图标 S1..S30
+ * @param  icon: 1..30
+ * @param  on: 1=亮，0=灭
+ * @return None
+ */
+static void Lcd_SetIcon(uint8_t icon, uint8_t on)
+{
+  if ((icon < 1U) || (icon > 30U))
+  {
+    return;
+  }
+  Lcd_SetSegment(LcdIconMap[icon - 1U].seg, LcdIconMap[icon - 1U].com, on);
+}
 
 /**
   * @brief  Configure the UART Device
