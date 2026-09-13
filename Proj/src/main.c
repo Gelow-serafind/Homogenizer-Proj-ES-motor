@@ -16,6 +16,10 @@
 /* 分步实施开关：电机占空比钳位（电机/新 LUT 未标定前保持 0，防止误动作） */
 #define MOTOR_DUTY_CLAMP 1U
 
+/* 上电即循环打印 AIN1/AIN0..3（电机光耦反馈 SPEED_SW）调试模式：置 1 后无需 PC 输入，上电直接观察通道值。
+   硬件信号问题定位期间使用；正常开发保持 0（shell 交互） */
+#define BOOT_TACH_LOOP 0U
+
 /* 任务周期（ms），可通过宏调整每个任务响应时间 */
 #define TASK_PERIOD_ENCODER_MS 2U
 #define TASK_PERIOD_APP_MS     10U
@@ -23,14 +27,21 @@
 #define TASK_PERIOD_LCD_MS     50U
 #define TASK_PERIOD_UART_CMD_MS 2U
 
-/* 业务参数 */
-#define RPM_STEP_MIN      5000U    /* 最小运行转速 */
-#define RPM_STEP_NORMAL   1000U    /* 旋钮分度值 */
-#define RPM_RAMP_STEP     50U      /* 每10ms平滑步进（5000 RPM/s） */
-#define RPM_MAX           20000U   /* 最大显示转速 */
-#define PWM_INACTIVE_PERMILLE 0U     /* 停机时 0% 占空比，电机停转 */
-#define LONG_PRESS_MS          2000U
-#define KEY_DEBOUNCE_TICKS     3U
+/* ============ 业务参数（需求 v1-260830，部分待确认，见 doc/修改计划.md §5） ============ */
+#define RPM_MIN          100U     /* 转速下限（需求写 "100/200"，未确认，先取 100） */
+#define RPM_STEP         10U      /* 旋钮分度：10 RPM */
+#define RPM_RAMP_STEP    10U      /* 每 10ms 平滑步进（1000 RPM/s），2000RPM 约 2s 到顶 */
+#define RPM_MAX          2000U    /* 转速上限（需求 2000） */
+#define TIME_HOUR_MAX    9999U    /* 倒计时小时上限（需求 9999.59.59） */
+#define SETTING_TIMEOUT_MS  5000U /* 设置无操作自动确认时间 */
+#define PWM_INACTIVE_PERMILLE 0U  /* 停机时 0% 占空比，电机停转 */
+#define KEY_DEBOUNCE_TICKS   3U
+
+/* 开始/停止键（新板 V1.0：均低有效，外部 10k 上拉 R13/R11，按下=低） */
+#define KEY_START_GPIO_PORT  GPIOA
+#define KEY_START_PIN        GPIO_Pin_2   /* PA2 = MCU_SW_SRART */
+#define KEY_STOP_GPIO_PORT   GPIOD
+#define KEY_STOP_PIN         GPIO_Pin_7   /* PD7 = MCU_SW_STOP  */
 
 #define EC11_GPIO_PORT GPIOC
 /* 新板（V1.0 原理图）：A=PC5, B=PC3, 按键=PC4；全部高有效（公共端接 5V，外部 10k 下拉） */
@@ -95,86 +106,137 @@ static const uint16_t RpmDutyLUT[][2] = {
 /* Flash 存储 - 磨损均衡 -----------------------------------------------------*/
 /* 使用最后 128 字节页，32 个 uint32 slot（仅低 16 位存转速），免去独立计数位置 */
 #define FLASH_SAVE_PAGE_ADDR ((uint32_t)0x08003F80)
-#define FLASH_SAVE_SLOTS     32U
-#define FLASH_SAVE_SLOT_SIZE 4U
+#define FLASH_SAVE_SLOTS     16U  /* 末页 128B / 8B 槽 */
+#define FLASH_SAVE_SLOT_SIZE 8U   /* 槽布局: {u16 speed,u16 hours} + {u8 min,u8 sec,u16 rsv} */
 
-static uint16_t FlashLastSavedRpm = 0xFFFF;
+/* ====================== 业务参数类型与 Flash 持久化 ====================== */
 
-/* 从后往前扫描，返回最后一个有效转速值；无则返回 0
-   仅接受高 16 位为 0 的条目（排除旧版本时间数据等残留） */
+/* 用户设定参数：目标转速 + 倒计时(H-M-S) */
+typedef struct {
+  uint16_t speed;
+  uint16_t hours;
+  uint8_t  min;
+  uint8_t  sec;
+} UserParam_t;
+
 /**
- * @brief  从 Flash 最后 128 字节页读取上次保存的转速值（从后往前扫描）
+ * @brief  从 Flash 末页向前扫描返回最后一条有效参数（含范围校验）
  * @param  None
- * @return 上次保存的转速值，若无有效数据则返回 0
+ * @return 有效参数；无有效记录返回 {0,0,0,0}
+ * @note   空槽特征：槽内两个 u32 均为 0xFFFFFFFF（擦除态）
  */
-static uint16_t LoadLastRpm(void)
+static UserParam_t LoadParams(void)
 {
-    for (int16_t i = (int16_t)(FLASH_SAVE_SLOTS - 1); i >= 0; i--)
+  UserParam_t p;
+  p.speed = 0U; p.hours = 0U; p.min = 0U; p.sec = 0U;
+
+  for (int16_t i = (int16_t)(FLASH_SAVE_SLOTS - 1); i >= 0; i--)
+  {
+    uint32_t addr = FLASH_SAVE_PAGE_ADDR + (uint32_t)i * FLASH_SAVE_SLOT_SIZE;
+    uint32_t w0 = *(volatile uint32_t*)addr;
+    uint32_t w1 = *(volatile uint32_t*)(addr + 4U);
+
+    if (w0 != 0xFFFFFFFFU && w1 != 0xFFFFFFFFU && (w1 >> 16) == 0U)
     {
-        uint32_t word = *(volatile uint32_t*)(FLASH_SAVE_PAGE_ADDR + (uint32_t)i * FLASH_SAVE_SLOT_SIZE);
-        if (word != 0xFFFFFFFFU && (word >> 16) == 0)
-        {
-            return (uint16_t)(word & 0xFFFFU);
-        }
+      uint16_t sp = (uint16_t)(w0 & 0xFFFFU);
+      uint16_t hr = (uint16_t)(w0 >> 16);
+      uint8_t  mi = (uint8_t)(w1 & 0xFFU);
+      uint8_t  se = (uint8_t)((w1 >> 8) & 0xFFU);
+      if (sp <= RPM_MAX && hr <= TIME_HOUR_MAX && mi < 60U && se < 60U)
+      {
+        p.speed = sp; p.hours = hr; p.min = mi; p.sec = se;
+      }
+      return p;   /* 最后一条记录（无论校验是否通过都停止扫描） */
     }
-    return 0;
+  }
+  return p;
 }
 
-/* 找第一个空位（低 16 位为 0xFFFF）写入；无空位则擦除整页后写入 slot 0 */
 /**
- * @brief  将转速值写入 Flash 最后 128 字节页（磨损均衡：找空位写入或擦除整页重写）
- * @param  rpm: 待保存的转速值
+ * @brief  将用户参数写入 Flash 末页（磨损均衡：找空槽写入，写满擦除整页重写）
+ * @param  p: 待保存参数
  * @return None
  */
-static void SaveRpmToFlash(uint16_t rpm)
+static void SaveParams(const UserParam_t* p)
 {
-    uint8_t i;
-    uint32_t word;
-    uint32_t addr;
+  uint8_t i;
+  uint32_t addr;
+  uint32_t w0 = (uint32_t)p->speed | ((uint32_t)p->hours << 16);
+  uint32_t w1 = (uint32_t)p->min | ((uint32_t)p->sec << 8);
 
-    for (i = 0; i < FLASH_SAVE_SLOTS; i++)
+  for (i = 0; i < FLASH_SAVE_SLOTS; i++)
+  {
+    addr = FLASH_SAVE_PAGE_ADDR + (uint32_t)i * FLASH_SAVE_SLOT_SIZE;
+    if (*(volatile uint32_t*)addr == 0xFFFFFFFFU)
     {
-        addr = FLASH_SAVE_PAGE_ADDR + (uint32_t)i * FLASH_SAVE_SLOT_SIZE;
-        word = *(volatile uint32_t*)addr;
-        if ((word & 0xFFFFU) == 0xFFFFU)
-        {
-            FLASH_Unlock();
-            FLASH_ProgramWord(addr, (uint32_t)rpm);
-            FLASH_Lock();
-            return;
-        }
+      FLASH_Unlock();
+      FLASH_ProgramWord(addr, w0);
+      FLASH_ProgramWord(addr + 4U, w1);
+      FLASH_Lock();
+      return;
     }
+  }
 
-    /* 所有 slot 已用完，擦除整页从头开始 */
-    FLASH_Unlock();
-    FLASH_ErasePage(FLASH_SAVE_PAGE_ADDR);
-    FLASH_ProgramWord(FLASH_SAVE_PAGE_ADDR, (uint32_t)rpm);
-    FLASH_Lock();
+  /* 所有槽已用完：擦除整页从头开始 */
+  FLASH_Unlock();
+  FLASH_ErasePage(FLASH_SAVE_PAGE_ADDR);
+  FLASH_ProgramWord(FLASH_SAVE_PAGE_ADDR, w0);
+  FLASH_ProgramWord(FLASH_SAVE_PAGE_ADDR + 4U, w1);
+  FLASH_Lock();
 }
 
 /* Private variables ---------------------------------------------------------*/
 static uint16_t PWMPeriod;
 
-/* 编码器基础信息 */
+/* 输入事件（轮询任务置位，Task_App 消费清零） */
 static volatile int32_t EncoderPosition = 0;
 static volatile int8_t EncDeltaPending = 0;
-static volatile uint8_t KeyShortPressEvent = 0;
-static volatile uint8_t KeyLongPressEvent = 0;
-static volatile uint8_t KeyPressedState = 1U; /* active-low: 0=pressed */
+static volatile uint8_t KeyShortPressEvent = 0;  /* 旋钮单击 */
+static volatile uint8_t StartKeyEvent = 0;       /* 开始键按下沿 */
+static volatile uint8_t StopKeyEvent  = 0;       /* 停止键按下沿 */
 
-/* 业务数据 */
+/* ====================== 业务状态机（需求：STANDBY/RUNNING/PAUSED + 设置叠加层） ====================== */
 typedef enum {
-  APP_MODE_STOPPED = 0,
-  APP_MODE_RUNNING
+  APP_STANDBY = 0,   /* 待机：显示上次参数，可直接启动 */
+  APP_RUNNING,       /* 运行：转速 ramp、到达目标后倒计时 */
+  APP_PAUSED         /* 暂停：电机停、倒计时冻结、可恢复 */
 } AppMode_t;
 
-static volatile AppMode_t AppMode = APP_MODE_STOPPED;
+/* 设置叠加层：可在 STANDBY / RUNNING（电机保持转）/ PAUSED 之上激活 */
+typedef enum {
+  FIELD_SPEED = 0,   /* 目标转速 */
+  FIELD_TIME_H,      /* 倒计时-小时 */
+  FIELD_TIME_M,      /* 倒计时-分钟 */
+  FIELD_TIME_S       /* 倒计时-秒 */
+} SettingField_t;
 
-static uint16_t ConfigRpm = 0;    /* 目标转速，旋钮调整此值 */
-static uint16_t MotorRpm = 0;     /* 实际输出转速（运行时平滑 ramp） */
+static volatile AppMode_t AppMode = APP_STANDBY;
 
+/* 用户设定参数（上电从 Flash 恢复 / 设置确认后保存） */
+static uint16_t ConfigRpm = 0;
+static uint16_t ConfigHours = 0;
+static uint8_t  ConfigMin = 0;
+static uint8_t  ConfigSec = 0;
+
+/* 运行模型与实际倒计时 */
+static uint16_t MotorRpm = 0;          /* 实际输出转速（模型 ramp；P4 接入真实测速后校正） */
+static uint16_t RemHours = 0;          /* 倒计时剩余 */
+static uint8_t  RemMin = 0;
+static uint8_t  RemSec = 0;
+static volatile uint8_t RemActive = 0; /* RUNNING 且已到达目标 → 倒计时进行中 */
+
+/* 设置与显示 */
+static volatile uint8_t SettingActive = 0;
+static SettingField_t  SettingField = FIELD_SPEED;
+static uint16_t SettingIdleMs = 0;     /* 设置无操作计时（>=SETTING_TIMEOUT_MS 自动确认） */
+static volatile uint8_t BlinkOn = 0;   /* 字段闪烁相位（Task_App 每 500ms 翻转） */
+static volatile uint8_t SensorValid = 0; /* PT1000 插入（P4 由 ADS1115 采样更新） */
+static volatile uint8_t LcdManual = 0; /* lcd 调试命令置位：暂停业务自动刷新，仅按脏标记送屏 */
+
+/* PWM 状态 */
 static volatile uint16_t CurrentDutyPermille = 0U;
 static volatile uint8_t DutyChanged = 1U;
+static volatile uint8_t MotorPwmManual = 0U; /* 手动占空比模式（标定/驱动链验证用） */
 
 /* ====================== HT1623 显示缓冲与段位映射 ====================== */
 static uint8_t LcdRam[HT1623_RAM_NIBBLES] = {0};
@@ -259,8 +321,12 @@ static uint8_t           cmdLineLen = 0U;
 /* 注册指令回调函数原型 */
 static void Cmd_Help(const char* args);
 static void Cmd_SetSpeed(const char* args);
+static void Cmd_SetTime(const char* args);
 static void Cmd_Start(const char* args);
-static void Cmd_Pause(const char* args);
+static void Cmd_Stop(const char* args);
+static void Cmd_Pwm(const char* args);
+static void Cmd_Ads(const char* args);
+static void Cmd_Tach(const char* args);
 static void Cmd_Status(const char* args);
 static void Cmd_Lcd(const char* args);
 
@@ -269,8 +335,13 @@ static const CmdEntry_t cmdTable[] = {
   { "help",   Cmd_Help   },
   { "h",      Cmd_Help   },
   { "speed",  Cmd_SetSpeed },
+  { "time",   Cmd_SetTime },
   { "start",  Cmd_Start  },
-  { "pause",  Cmd_Pause  },
+  { "stop",   Cmd_Stop   },
+  { "pause",  Cmd_Stop   },   /* pause 为 stop 别名，语义=暂停 */
+  { "pwm",    Cmd_Pwm    },
+  { "adc",    Cmd_Ads    },
+  { "tach",   Cmd_Tach   },
   { "status", Cmd_Status },
   { "lcd",    Cmd_Lcd    },
   { NULL,     NULL       }
@@ -283,6 +354,12 @@ static void TIM1_SetDutyPermille(uint16_t dutyPermille);
 static void HT1623_Init(void);
 
 static void EC11_Config(void);
+static void I2C_ADS1115_Init(void);
+static void Ads_DelayMs(uint32_t ms);
+static uint16_t Ads_ReadCh(uint8_t ch);
+#if (BOOT_TACH_LOOP == 1U)
+static void BootTachLoop(void);
+#endif
 
 /* 任务处理函数 */
 static void Task_Encoder(void);
@@ -295,8 +372,11 @@ static void Task_UartCmd(void);
 static uint8_t RpmToDutyPercent(uint16_t rpm);
 static uint16_t GetTargetDutyPermille(void);
 static const char* GetModeName(AppMode_t mode);
-static uint16_t LoadLastRpm(void);
-static void SaveRpmToFlash(uint16_t rpm);
+static void AppStart(void);
+static void AppStop(void);
+static void AppCommitSetting(void);
+static void AppEnterSetting(void);
+static void RefreshDisplay(void);
 
 /* HT1623 驱动与显示层 */
 static void HT1623_Delay(void);
@@ -349,11 +429,12 @@ int main(void)
   TIM1_PWM_Config();
   /* EC11 GPIO配置 */
   EC11_Config();
+  /* ADS1115 I2C 配置（PA1/PA3）：AIN1=电机光耦测速 SPEED_SW、AIN0=PT1000 */
+  I2C_ADS1115_Init();
 
   /* HT1623 屏幕配置（新板 4 线串行接口） */
   HT1623_Init();
-  /* 上电全亮测试：验证整屏点亮与对比度，后续用 lcd 命令逐点测试 */
-  Lcd_All(1U);
+  /* 业务显示由 Task_LCD（50ms）自动整屏刷新接管；开机即显示恢复的 STANDBY 参数 */
 
   /* Configure SysTick Timer for 1ms interrupts */
   if (SysTick_Config(SystemCoreClock / 1000))
@@ -362,9 +443,14 @@ int main(void)
     while (1);
   }
 
-  /* 从 Flash 恢复上次设置的转速 */
-  ConfigRpm = LoadLastRpm();
-  FlashLastSavedRpm = ConfigRpm;
+  /* 从 Flash 恢复上次设置的目标转速与倒计时（H-M-S） */
+  {
+    UserParam_t p = LoadParams();
+    ConfigRpm = p.speed;
+    ConfigHours = p.hours;
+    ConfigMin = p.min;
+    ConfigSec = p.sec;
+  }
 
   printf("\n\r===== Homogenizer Controller =====\n\r");
   printf("HK32F0301MxxxxC shell ready, type 'help'\n\r");
@@ -377,6 +463,10 @@ int main(void)
 
   printf("Starting scheduler...\n\r");
   printf("homogenizer > ");
+
+#if (BOOT_TACH_LOOP == 1U)
+  BootTachLoop();   /* 上电即循环测速打印（不返回；验证完将 BOOT_TACH_LOOP 置 0 恢复 shell） */
+#endif
 
   /* 主循环：轮询任务表，倒计时为0则执行任务并重置倒计时 */
   while(1)
@@ -412,11 +502,6 @@ static void Task_Encoder(void)
   static uint8_t prevAB = 0x03;
   static int8_t stepAcc = 0;
 
-  static uint8_t keyStable = 1U;
-  static uint8_t keyDebounce = 0;
-  static uint16_t keyPressMs = 0U;
-  static uint8_t longFired = 0U;
-
   uint8_t a = (GPIO_ReadInputDataBit(EC11_GPIO_PORT, EC11_PIN_A) != Bit_RESET) ? 1U : 0U;
   uint8_t b = (GPIO_ReadInputDataBit(EC11_GPIO_PORT, EC11_PIN_B) != Bit_RESET) ? 1U : 0U;
   uint8_t currAB = (uint8_t)((a << 1) | b);
@@ -449,147 +534,367 @@ static void Task_Encoder(void)
 
   prevAB = currAB;
 
-  /* 新板按键高有效（外部下拉，按下=高）：读到高电平即按下，下面沿用 0=按下 的内部语义 */
+  /* ---- 旋钮按键 EC11 KEY（PC4，高有效 按下=高；单击=确认/切换字段） ---- */
+  /* 内部语义：raw=0 表示按下；在释放沿产生一次单击事件 */
   {
-    uint8_t keyRaw = (GPIO_ReadInputDataBit(EC11_GPIO_PORT, EC11_PIN_KEY) == Bit_RESET) ? 1U : 0U;
+    static uint8_t st = 1U;   /* 0=pressed（按键状态） */
+    static uint8_t db = 0U;
+    uint8_t raw = (GPIO_ReadInputDataBit(EC11_GPIO_PORT, EC11_PIN_KEY) == Bit_RESET) ? 1U : 0U;
 
-    if (keyRaw != keyStable)
+    if (raw != st)
     {
-      if (++keyDebounce >= KEY_DEBOUNCE_TICKS)
+      if (++db >= KEY_DEBOUNCE_TICKS)
       {
-        keyDebounce = 0;
-        keyStable = keyRaw;
-        KeyPressedState = keyStable;
-
-        if (keyStable == 0U)
+        db = 0U;
+        st = raw;
+        if (st == 1U)          /* 释放沿 → 单击 */
         {
-          keyPressMs = 0U;
-          longFired = 0U;
-        }
-        else
-        {
-          if ((longFired == 0U) && (keyPressMs > 0U))
-          {
-            KeyShortPressEvent = 1U;
-          }
-          keyPressMs = 0U;
-          longFired = 0U;
+          KeyShortPressEvent = 1U;
         }
       }
     }
     else
     {
-      keyDebounce = 0;
+      db = 0U;
+    }
+  }
 
-      if (keyStable == 0U)
+  /* ---- 开始键（PA2，低有效 按下=低，外部上拉 R13）---- */
+  {
+    static uint8_t st = 1U;   /* 1=未按，0=按下 */
+    static uint8_t db = 0U;
+    uint8_t raw = (GPIO_ReadInputDataBit(KEY_START_GPIO_PORT, KEY_START_PIN) == Bit_RESET) ? 1U : 0U;
+
+    if (raw != st)
+    {
+      if (++db >= KEY_DEBOUNCE_TICKS)
       {
-        if (keyPressMs < 60000U)
+        db = 0U;
+        st = raw;
+        if (st == 1U)          /* 按下沿 → 开始事件（单次，不重复） */
         {
-          keyPressMs += TASK_PERIOD_ENCODER_MS;
-        }
-
-        if ((longFired == 0U) && (keyPressMs >= LONG_PRESS_MS))
-        {
-          KeyLongPressEvent = 1U;
-          longFired = 1U;
+          StartKeyEvent = 1U;
         }
       }
+    }
+    else
+    {
+      db = 0U;
+    }
+  }
+
+  /* ---- 停止键（PD7，低有效 按下=低，外部上拉 R11）---- */
+  {
+    static uint8_t st = 1U;
+    static uint8_t db = 0U;
+    uint8_t raw = (GPIO_ReadInputDataBit(KEY_STOP_GPIO_PORT, KEY_STOP_PIN) == Bit_RESET) ? 1U : 0U;
+
+    if (raw != st)
+    {
+      if (++db >= KEY_DEBOUNCE_TICKS)
+      {
+        db = 0U;
+        st = raw;
+        if (st == 1U)          /* 按下沿 → 停止事件 */
+        {
+          StopKeyEvent = 1U;
+        }
+      }
+    }
+    else
+    {
+      db = 0U;
     }
   }
 }
 
+/* ====================== 业务状态机（STEP3） ====================== */
+
+static volatile uint8_t TimeEditedInSetting = 0; /* 设置期间是否改过时间（PAUSED 恢复时据此重载） */
+
 /**
- * @brief  应用逻辑任务：处理编码器事件、更新目标转速、运行/停止切换、转速平滑 ramp
+ * @brief  将当前设定参数写入 Flash（设置确认 / 启动 / 停止时调用）
+ * @param  None
+ * @return None
+ */
+static void AppCommitSetting(void)
+{
+  UserParam_t p;
+  p.speed = ConfigRpm;
+  p.hours = ConfigHours;
+  p.min = ConfigMin;
+  p.sec = ConfigSec;
+  SaveParams(&p);
+}
+
+/**
+ * @brief  进入设置叠加层（任一非设置状态单击旋钮触发）
+ * @param  None
+ * @return None
+ */
+static void AppEnterSetting(void)
+{
+  if (SettingActive != 0U)
+  {
+    return;
+  }
+  SettingActive = 1U;
+  SettingField = FIELD_SPEED;
+  SettingIdleMs = 0U;
+  TimeEditedInSetting = 0U;
+}
+
+/**
+ * @brief  开始/继续运行：设置确认并退出 → RUNNING，装载或续用倒计时
+ * @param  None
+ * @return None
+ */
+static void AppStart(void)
+{
+  if (SettingActive != 0U)          /* 设置中按开始：先确认写入并退出设置 */
+  {
+    AppCommitSetting();
+    SettingActive = 0U;
+    SettingIdleMs = 0U;
+  }
+  if (AppMode == APP_RUNNING)
+  {
+    return;
+  }
+
+  if (ConfigRpm == 0U)
+  {
+    ConfigRpm = RPM_MIN;            /* 无设定速度时给最小转速 */
+  }
+
+  if (AppMode != APP_PAUSED)
+  {
+    /* 全新启动：倒计时从设定时间装载 */
+    RemHours = ConfigHours; RemMin = ConfigMin; RemSec = ConfigSec;
+  }
+  else if (TimeEditedInSetting != 0U)
+  {
+    /* 暂停后改过时间：按新设定重载倒计时（需求：改了参数按新参数重新运行） */
+    RemHours = ConfigHours; RemMin = ConfigMin; RemSec = ConfigSec;
+  }
+  /* 否则：PAUSED 且未改时间 → 保留冻结的倒计时继续 */
+
+  RemActive = 0U;                   /* 到达目标转速后置位开始递减 */
+  AppMode = APP_RUNNING;
+  DutyChanged = 1U;
+}
+
+/**
+ * @brief  停止/暂停：RUNNING→PAUSED（倒计时冻结）；设置中则确认并退出
+ * @param  None
+ * @return None
+ */
+static void AppStop(void)
+{
+  if (SettingActive != 0U)
+  {
+    AppCommitSetting();
+    SettingActive = 0U;
+    SettingIdleMs = 0U;
+  }
+  if (AppMode == APP_RUNNING)
+  {
+    AppMode = APP_PAUSED;
+    RemActive = 0U;                 /* 冻结：保留 RemHours/Min/Sec 供恢复 */
+    DutyChanged = 1U;               /* MotorRpm 将 ramp 到 0 */
+  }
+}
+
+/**
+ * @brief  按当前编辑字段应用一次旋钮增量（单位步进）
+ * @param  dir: +1 增加 / -1 减少
+ * @return None
+ */
+static void ApplyKnobDelta(int8_t dir)
+{
+  switch (SettingField)
+  {
+    case FIELD_SPEED:
+      if (dir > 0)
+      {
+        ConfigRpm += RPM_STEP;
+        if (ConfigRpm > RPM_MAX) ConfigRpm = RPM_MAX;
+      }
+      else
+      {
+        if (ConfigRpm > RPM_MIN + RPM_STEP) ConfigRpm -= RPM_STEP;
+        else ConfigRpm = RPM_MIN;   /* 下限钳位（需求未定义 0 档） */
+      }
+      break;
+
+    case FIELD_TIME_H:
+      if (dir > 0)
+      {
+        if (ConfigHours < TIME_HOUR_MAX) ConfigHours++;
+      }
+      else if (ConfigHours > 0U)
+      {
+        ConfigHours--;
+      }
+      TimeEditedInSetting = 1U;
+      break;
+
+    case FIELD_TIME_M:
+      ConfigMin = (dir > 0) ? (uint8_t)((ConfigMin + 1U) % 60U)
+                            : (uint8_t)((ConfigMin + 59U) % 60U);
+      TimeEditedInSetting = 1U;
+      break;
+
+    case FIELD_TIME_S:
+      ConfigSec = (dir > 0) ? (uint8_t)((ConfigSec + 1U) % 60U)
+                            : (uint8_t)((ConfigSec + 59U) % 60U);
+      TimeEditedInSetting = 1U;
+      break;
+
+    default: break;
+  }
+}
+
+/**
+ * @brief  倒计时每秒节拍（仅 RemActive 时调用）
+ * @param  None
+ * @return None
+ */
+static void CountdownTick(void)
+{
+  if (RemSec > 0U)
+  {
+    RemSec--;
+  }
+  else if (RemMin > 0U)
+  {
+    RemMin--; RemSec = 59U;
+  }
+  else if (RemHours > 0U)
+  {
+    RemHours--; RemMin = 59U; RemSec = 59U;
+  }
+  else
+  {
+    /* 倒计时归零：停止电机并保留设定参数（归零行为待确认，暂按此实现） */
+    RemActive = 0U;
+    AppMode = APP_STANDBY;
+    MotorRpm = 0U;
+    DutyChanged = 1U;
+  }
+}
+
+/**
+ * @brief  应用逻辑任务：四态状态机 + 设置编辑 + 转速 ramp + 倒计时
  * @param  None
  * @return None
  */
 static void Task_App(void)
 {
   int8_t delta = 0;
-  uint8_t longEvt = 0U;
+  uint8_t click = 0U;
+  uint8_t start = 0U;
+  uint8_t stop = 0U;
+  static uint16_t blinkMs = 0U;
+  static uint16_t secMs = 0U;
 
   __disable_irq();
-  delta = EncDeltaPending;
-  EncDeltaPending = 0;
-  KeyShortPressEvent = 0U;
-  longEvt = KeyLongPressEvent;
-  KeyLongPressEvent = 0U;
+  delta = EncDeltaPending;    EncDeltaPending = 0;
+  click = KeyShortPressEvent; KeyShortPressEvent = 0U;
+  start = StartKeyEvent;      StartKeyEvent = 0U;
+  stop  = StopKeyEvent;       StopKeyEvent = 0U;
   __enable_irq();
 
-  /* 长按：运行/停止切换 */
-  if (longEvt != 0U)
+  /* ---- 按键事件（优先级：开始 > 停止 > 单击/旋钮） ---- */
+  if (start != 0U)
   {
-    if (AppMode == APP_MODE_RUNNING)
+    AppStart();
+  }
+  else if (stop != 0U)
+  {
+    AppStop();
+  }
+  else if (SettingActive != 0U)
+  {
+    if (click != 0U)   /* 单击：SPEED → TIME_H → TIME_M → TIME_S → SPEED 循环 */
     {
-      AppMode = APP_MODE_STOPPED;
-      MotorRpm = 0U;
-      DutyChanged = 1U;
+      SettingField = (SettingField_t)(((int)SettingField + 1) % 4);
+      SettingIdleMs = 0U;
     }
-    else
+    if (delta != 0U)   /* 旋钮：调整当前编辑字段 */
     {
-      AppMode = APP_MODE_RUNNING;
-      /* MotorRpm 从 0 开始 ramp 到 ConfigRpm */
-      DutyChanged = 1U;
+      while (delta > 0) { ApplyKnobDelta(1);  delta--; }
+      while (delta < 0) { ApplyKnobDelta(-1); delta++; }
+      SettingIdleMs = 0U;
+      DutyChanged = 1U;   /* RUNNING 下转速实时作用于电机 */
+    }
+  }
+  else if (click != 0U)
+  {
+    AppEnterSetting();      /* 任一非设置状态单击 → 进入设置 */
+  }
+
+  /* ---- 10ms 时基：闪烁相位 500ms（供 LCD 字段闪烁） ---- */
+  blinkMs += TASK_PERIOD_APP_MS;
+  if (blinkMs >= 500U)
+  {
+    blinkMs = 0U;
+    BlinkOn ^= 1U;
+  }
+
+  /* ---- 设置无操作 5s 自动确认写入 ---- */
+  if (SettingActive != 0U)
+  {
+    SettingIdleMs += TASK_PERIOD_APP_MS;
+    if (SettingIdleMs >= SETTING_TIMEOUT_MS)
+    {
+      AppCommitSetting();
+      SettingActive = 0U;
+      SettingIdleMs = 0U;
     }
   }
 
-  /* 转动旋钮：调整目标转速，分度值 1000，0↔5000 跳变 */
-  while (delta > 0)
+  /* ---- 电机模型 ramp：RUNNING→目标 ConfigRpm，其余→0 ---- */
   {
-    if (ConfigRpm == 0)
+    uint16_t target = (AppMode == APP_RUNNING) ? ConfigRpm : 0U;
+    if (MotorRpm != target)
     {
-      ConfigRpm = RPM_STEP_MIN;              /* 0 → 5000 */
-    }
-    else if (ConfigRpm < RPM_STEP_MIN)
-    {
-      ConfigRpm = RPM_STEP_MIN;
-    }
-    else
-    {
-      ConfigRpm += RPM_STEP_NORMAL;
-      if (ConfigRpm > RPM_MAX) ConfigRpm = RPM_MAX;
-    }
-    delta--;
-  }
-
-  while (delta < 0)
-  {
-    if (ConfigRpm <= RPM_STEP_MIN)
-    {
-      ConfigRpm = 0;                          /* ≤5000 → 0 */
-    }
-    else
-    {
-      ConfigRpm -= RPM_STEP_NORMAL;
-      if (ConfigRpm < RPM_STEP_MIN) ConfigRpm = 0;
-    }
-    delta++;
-  }
-
-  /* ConfigRpm 变更时保存到 Flash（磨损均衡，仅值不同时写入） */
-  if (ConfigRpm != FlashLastSavedRpm)
-  {
-    SaveRpmToFlash(ConfigRpm);
-    FlashLastSavedRpm = ConfigRpm;
-  }
-
-  /* 运行时平滑 ramp：MotorRpm 均匀趋近 ConfigRpm */
-  if (AppMode == APP_MODE_RUNNING && MotorRpm != ConfigRpm)
-  {
-    if (MotorRpm < ConfigRpm)
-    {
-      MotorRpm += RPM_RAMP_STEP;
-      if (MotorRpm > ConfigRpm) MotorRpm = ConfigRpm;
-    }
-    else
-    {
-      if (MotorRpm > RPM_RAMP_STEP)
-        MotorRpm -= RPM_RAMP_STEP;
+      if (MotorRpm < target)
+      {
+        MotorRpm += RPM_RAMP_STEP;
+        if (MotorRpm > target) MotorRpm = target;
+      }
       else
-        MotorRpm = 0;
-      if (MotorRpm < ConfigRpm) MotorRpm = ConfigRpm;
+      {
+        if (MotorRpm > RPM_RAMP_STEP) MotorRpm -= RPM_RAMP_STEP;
+        else MotorRpm = 0U;
+        if (MotorRpm < target) MotorRpm = target;
+      }
+      DutyChanged = 1U;
     }
-    DutyChanged = 1U;
+  }
+
+  /* ---- 倒计时：RUNNING 下到达目标后启动；每秒递减；归零停止 ---- */
+  if (AppMode == APP_RUNNING)
+  {
+    if (RemActive == 0U)
+    {
+      /* 首次到达目标转速且设定了时间 → 启动倒计时 */
+      if ((MotorRpm == ConfigRpm) && (ConfigRpm > 0U) &&
+          ((ConfigHours | ConfigMin | ConfigSec) != 0U))
+      {
+        RemActive = 1U;
+      }
+    }
+    else
+    {
+      secMs += TASK_PERIOD_APP_MS;
+      if (secMs >= 1000U)
+      {
+        secMs = 0U;
+        CountdownTick();
+      }
+    }
   }
 }
 
@@ -601,6 +906,10 @@ static void Task_App(void)
  */
 static void Task_PWM(void)
 {
+  if (MotorPwmManual != 0U)
+  {
+    return;   /* 手动标定模式：不覆盖 CCR（用 pwm off 恢复自动） */
+  }
   if (DutyChanged)
   {
     CurrentDutyPermille = GetTargetDutyPermille();
@@ -744,43 +1053,168 @@ static void Cmd_SetSpeed(const char* args)
     args++;
   }
   if (val < 0) val = 0;
-  if (val > RPM_MAX) val = RPM_MAX;
+  if (val > (int)RPM_MAX) val = RPM_MAX;
 
   ConfigRpm = (uint16_t)val;
+  AppCommitSetting();                       /* speed 命令=直接确认写入 */
   printf("\r\nSpeed set to %u RPM\r\n", (unsigned)ConfigRpm);
 }
 
 /**
- * @brief  通过 UART 启动电机（start 命令回调）
+ * @brief  通过 UART 设置倒计时（time 命令回调：time <h> <m> <s>）
+ * @param  args: "H M S" 三个十进制数
+ * @return None
+ */
+static void Cmd_SetTime(const char* args)
+{
+  int h = 0, m = 0, s = 0;
+  const char* p = args;
+
+  while (*p == ' ') p++;
+  while (*p >= '0' && *p <= '9') { h = h * 10 + (*p - '0'); p++; }
+  while (*p == ' ') p++;
+  while (*p >= '0' && *p <= '9') { m = m * 10 + (*p - '0'); p++; }
+  while (*p == ' ') p++;
+  while (*p >= '0' && *p <= '9') { s = s * 10 + (*p - '0'); p++; }
+
+  if (h < 0) h = 0;
+  if (h > (int)TIME_HOUR_MAX) h = TIME_HOUR_MAX;
+  if (m < 0) m = 0;
+  if (m > 59) m = 59;
+  if (s < 0) s = 0;
+  if (s > 59) s = 59;
+
+  ConfigHours = (uint16_t)h;
+  ConfigMin = (uint8_t)m;
+  ConfigSec = (uint8_t)s;
+  AppCommitSetting();                       /* time 命令=直接确认写入 */
+  printf("\r\nTime set to %u:%02u:%02u\r\n", (unsigned)ConfigHours,
+         (unsigned)ConfigMin, (unsigned)ConfigSec);
+}
+
+/**
+ * @brief  通过 UART 启动/继续（start 命令回调）
  * @param  args: 命令参数（未使用）
  * @return None
  */
 static void Cmd_Start(const char* args)
 {
   (void)args;
-  if (AppMode != APP_MODE_RUNNING)
-  {
-    AppMode = APP_MODE_RUNNING;
-    DutyChanged = 1U;
-    printf("\r\nStart\r\n");
-  }
+  AppStart();
+  printf("\r\nState -> %s\r\n", GetModeName(AppMode));
 }
 
 /**
- * @brief  通过 UART 暂停电机（pause 命令回调）
+ * @brief  通过 UART 停止/暂停（stop/pause 命令回调）
  * @param  args: 命令参数（未使用）
  * @return None
  */
-static void Cmd_Pause(const char* args)
+static void Cmd_Stop(const char* args)
 {
   (void)args;
-  if (AppMode == APP_MODE_RUNNING)
+  AppStop();
+  printf("\r\nState -> %s\r\n", GetModeName(AppMode));
+}
+
+/**
+ * @brief  手动 PWM 占空比调试命令：pwm <0-1000> 或 pwm off
+ *         标定/驱动链验证用：直接写 TIM1 CCR，绕过占空比钳位与 LUT
+ *         0=停，1000=100% 导通（PWM 高电平=电机通电）。pwm off 恢复自动（钳位 0%）。
+ * @param  args: 千分比 0-1000 或 off
+ * @return None
+ */
+static void Cmd_Pwm(const char* args)
+{
+  int val = 0;
+  const char* p = args;
+
+  while (*p == ' ') p++;
+
+  if (strncmp(p, "off", 3U) == 0)
   {
-    AppMode = APP_MODE_STOPPED;
-    MotorRpm = 0U;
-    DutyChanged = 1U;
-    printf("\r\nPause\r\n");
+    MotorPwmManual = 0U;
+    DutyChanged = 1U;   /* 恢复自动：Task_PWM 立即写回自动占空比（当前钳位 0%） */
+    printf("\r\nPWM: auto restored (duty clamped to 0%%)\r\n");
+    return;
   }
+
+  while (*p >= '0' && *p <= '9')
+  {
+    val = val * 10 + (*p - '0');
+    p++;
+  }
+  if (val < 0) val = 0;
+  if (val > 1000) val = 1000;
+
+  MotorPwmManual = 1U;
+  TIM1_SetDutyPermille((uint16_t)val);
+  printf("\r\nPWM: manual duty = %d/1000 (%d.%u%%)\r\n",
+         val, val / 10, (unsigned)(val % 10));
+}
+
+/**
+ * @brief  读 ADS1115 两通道原始值（信号/接线验证用）
+ * @param  args: 未使用
+ * @return None
+ */
+static void Cmd_Ads(const char* args)
+{
+  (void)args;
+  uint16_t a0 = Ads_ReadCh(0U);
+  uint16_t a1 = Ads_ReadCh(1U);
+  printf("\r\nADS: AIN0(PT1000)=%u  AIN1(SPEED_SW)=%u  (0xFFFF=bus err)\r\n",
+         (unsigned)a0, (unsigned)a1);
+}
+
+/**
+ * @brief  连续采样 AIN1 并统计电平跳变（手转电机数脉冲用）
+ *         tach <n>：采样 n 次（默认 100），H 判据 raw>13000（≈2.5V）
+ * @param  args: 采样次数
+ * @return None
+ */
+static void Cmd_Tach(const char* args)
+{
+  const char* p = args;
+  uint32_t cnt = 100U;
+  uint32_t i, edges = 0U, hcnt = 0U, lcnt = 0U;
+  uint16_t v, vmin = 0xFFFFU, vmax = 0U;
+  uint8_t lvl, prev = 0xFFU;
+
+  while (*p == ' ') p++;
+  {
+    uint32_t d = 0U;
+    while (*p >= '0' && *p <= '9')
+    {
+      d = d * 10U + (uint32_t)(*p - '0');
+      p++;
+    }
+    if (d > 0U && d < 2000U) cnt = d;
+  }
+
+  printf("\r\nTach: AIN1 x%lu (H if raw>13000, 每跳变打一行)\r\n",
+         (unsigned long)cnt);
+  for (i = 0U; i < cnt; i++)
+  {
+    v = Ads_ReadCh(1U);
+    if (v != 0xFFFFU)
+    {
+      if (v < vmin) vmin = v;
+      if (v > vmax) vmax = v;
+      lvl = (v > 13000U) ? 1U : 0U;
+      if (lvl) hcnt++; else lcnt++;
+      if ((prev != 0xFFU) && (lvl != prev))
+      {
+        edges++;
+        printf("  edge#%lu raw=%u %s\r\n",
+               (unsigned long)edges, (unsigned)v, lvl ? "H" : "L");
+      }
+      prev = lvl;
+    }
+    Ads_DelayMs(2U);
+  }
+  printf("Tach done: edges=%lu high=%lu low=%lu min=%u max=%u\r\n",
+         (unsigned long)edges, (unsigned long)hcnt, (unsigned long)lcnt,
+         (unsigned)vmin, (unsigned)vmax);
 }
 
 /**
@@ -793,11 +1227,13 @@ static void Cmd_Status(const char* args)
   (void)args;
   uint8_t dutyPct = RpmToDutyPercent(MotorRpm);
 
-  printf("\r\nMode:%-10s | Target:%5u RPM | Motor:%5u RPM | Duty:%3u%%\r\n",
+  printf("\r\nMode:%-8s | Set:%4u | Motor:%4u | Duty:%3u%% | Rem:%u:%02u:%02u%s\r\n",
          GetModeName(AppMode),
          (unsigned)ConfigRpm,
          (unsigned)MotorRpm,
-         (unsigned)dutyPct);
+         (unsigned)dutyPct,
+         (unsigned)RemHours, (unsigned)RemMin, (unsigned)RemSec,
+         (RemActive != 0U) ? " (active)" : "");
 }
 
 /**
@@ -814,17 +1250,28 @@ static void Cmd_Lcd(const char* args)
 
   while (*args == ' ') args++;
 
+  /* auto：恢复业务自动刷新（退出 lcd 手动调试模式） */
+  if (strncmp(args, "auto", 4U) == 0)
+  {
+    LcdManual = 0U;
+    LcdDirty = 1U;
+    printf("\r\nLCD: auto refresh on\r\n");
+    return;
+  }
+
   if (strncmp(args, "all", 3U) == 0)
   {
+    LcdManual = 1U;
     Lcd_All(1U);
-    printf("\r\nLCD: all segments on\r\n");
+    printf("\r\nLCD: all segments on (manual)\r\n");
     return;
   }
 
   if (strncmp(args, "off", 3U) == 0)
   {
+    LcdManual = 1U;
     Lcd_All(0U);
-    printf("\r\nLCD: all segments off\r\n");
+    printf("\r\nLCD: all segments off (manual)\r\n");
     return;
   }
 
@@ -838,9 +1285,10 @@ static void Cmd_Lcd(const char* args)
       printf("\r\nLCD: digit out of range 1-28\r\n");
       return;
     }
+    LcdManual = 1U;
     Lcd_All(0U);
     Lcd_ShowDigit((uint8_t)val, 8U);
-    printf("\r\nLCD: digit %d = 8\r\n", val);
+    printf("\r\nLCD: digit %d = 8 (manual)\r\n", val);
     return;
   }
 
@@ -854,23 +1302,226 @@ static void Cmd_Lcd(const char* args)
       printf("\r\nLCD: icon out of range 1-30\r\n");
       return;
     }
+    LcdManual = 1U;
     Lcd_All(0U);
     Lcd_SetIcon((uint8_t)val, 1U);
-    printf("\r\nLCD: icon S%d on\r\n", val);
+    printf("\r\nLCD: icon S%d on (manual)\r\n", val);
     return;
   }
 
-  printf("\r\nLCD usage: lcd all | lcd off | lcd d1-28 | lcd s1-30\r\n");
+  printf("\r\nLCD usage: lcd auto | lcd all | lcd off | lcd d1-28 | lcd s1-30\r\n");
 }
 
-/* LCD 显示任务：50ms 检查脏标记，按需写入 HT1623 RAM */
+/* ====================== 业务显示：字段布局 / 图标绑定 / 整屏刷新 ====================== */
+
+/* 玻璃 28 个数码位的业务字段布局（推断初值，实测玻璃丝印后校准改此表即可）：
+   位1-4 SetSpeed | 位5-12 SetTime(H4:M2:S2) | 位13-16 InstSpeed |
+   位17-20 InstTemp(带小数点, P4 接入) | 位21-28 RemTime(H4:M2:S2) */
+typedef enum {
+  FLD_SET_SPEED = 0,
+  FLD_SET_TIME,
+  FLD_INST_SPEED,
+  FLD_INST_TEMP,
+  FLD_REM_TIME,
+  FLD_COUNT
+} LcdField_t;
+
+typedef struct {
+  uint8_t first;   /* 起始 digit 1..28 */
+  uint8_t len;     /* 位数（时间字段 H=4 M=2 S=2 递增排布） */
+} LcdFieldLayout_t;
+
+static const LcdFieldLayout_t FieldLayout[FLD_COUNT] = {
+  {  1, 4 },   /* FLD_SET_SPEED  位 1-4   */
+  {  5, 8 },   /* FLD_SET_TIME   位 5-12  */
+  { 13, 4 },   /* FLD_INST_SPEED 位 13-16 */
+  { 17, 4 },   /* FLD_INST_TEMP  位 17-20 */
+  { 21, 8 }    /* FLD_REM_TIME   位 21-28 */
+};
+
+/* 业务图标 → S 编号绑定（0=未绑定不亮；用 "lcd s1-30" 实测后填入对应编号即可）
+   需求右上角图标：十字架=传感器插入、时钟=倒计时、感叹号=本版永灭、
+   圆=电机转、▲=运行常亮（▲语义待确认） */
+typedef enum {
+  ICON_SENSOR = 0,   /* 十字架 */
+  ICON_CLOCK,        /* 时钟 */
+  ICON_WARN,         /* 感叹号 */
+  ICON_MOTOR,        /* 圆 */
+  ICON_ARROW         /* ▲ */
+} IconRole_t;
+
+static const uint8_t IconBind[5] = { 0U, 0U, 0U, 0U, 0U };
+
 /**
- * @brief  HT1623 LCD 显示任务：仅当显示缓冲变更时全量写入（29 字节）
+ * @brief  按业务角色点亮/熄灭图标（未绑定时无操作）
+ * @param  role: IconRole_t
+ * @param  on: 1=亮 0=灭
+ * @return None
+ */
+static void SetRoleIcon(uint8_t role, uint8_t on)
+{
+  uint8_t s = (role < 5U) ? IconBind[role] : 0U;
+  if (s != 0U)
+  {
+    Lcd_SetIcon(s, on);
+  }
+}
+
+/**
+ * @brief  将某字段 len 个 digit 全部消隐
+ * @param  first: 起始 digit
+ * @param  len: 位数
+ * @return None
+ */
+static void DrawBlankDigits(uint8_t first, uint8_t len)
+{
+  for (uint8_t i = 0U; i < len; i++)
+  {
+    Lcd_ShowDigit((uint8_t)(first + i), 10U);
+  }
+}
+
+/**
+ * @brief  右对齐显示数字，前导消隐；value==0 仅末位显示 0
+ * @param  first: 起始 digit（1..28）
+ * @param  len: 位宽
+ * @param  value: 数值
+ * @return None
+ */
+static void DrawNumberRL(uint8_t first, uint8_t len, uint32_t value)
+{
+  uint8_t buf[8];
+  uint8_t n = 0U;
+  uint32_t v = value;
+
+  DrawBlankDigits(first, len);
+
+  if (v == 0U)
+  {
+    Lcd_ShowDigit((uint8_t)(first + len - 1U), 0U);
+    return;
+  }
+  while ((v != 0U) && (n < len))
+  {
+    buf[n++] = (uint8_t)(v % 10U);
+    v /= 10U;
+  }
+  for (uint8_t i = 0U; i < n; i++)
+  {
+    Lcd_ShowDigit((uint8_t)(first + len - 1U - i), buf[i]);
+  }
+}
+
+/**
+ * @brief  两位数字显示（补零，0-99）
+ * @param  first: 起始 digit
+ * @param  v: 数值 0-99
+ * @return None
+ */
+static void DrawTwoDigits(uint8_t first, uint8_t v)
+{
+  Lcd_ShowDigit(first, (uint8_t)(v / 10U));
+  Lcd_ShowDigit((uint8_t)(first + 1U), (uint8_t)(v % 10U));
+}
+
+/**
+ * @brief  绘制时间字段（H4 右对齐消隐 + M2 补零 + S2 补零）
+ * @param  first: 字段起始 digit
+ * @param  h/m/s: 时分秒
+ * @return None
+ */
+static void DrawTimeField(uint8_t first, uint16_t h, uint8_t m, uint8_t s)
+{
+  DrawNumberRL(first, 4U, h);
+  DrawTwoDigits((uint8_t)(first + 4U), m);
+  DrawTwoDigits((uint8_t)(first + 6U), s);
+}
+
+/**
+ * @brief  整屏业务刷新：按当前状态/参数重建 LcdRam 缓冲（闪烁字段按 BlinkOn）
+ * @param  None
+ * @return None
+ * @note   由 Task_LCD 每 50ms 调用；手动 lcd 调试模式（LcdManual=1）下不调用
+ */
+static uint8_t LcdRamPrev[HT1623_RAM_NIBBLES]; /* 上次送屏缓冲（用于变更检测） */
+
+static void RefreshDisplay(void)
+{
+  uint8_t f;
+
+  memset(LcdRam, 0U, HT1623_RAM_NIBBLES);   /* 重建缓冲（先不置脏，末尾统一判定） */
+  LcdDirty = 0U;
+
+  /* ---- 图标 ---- */
+  SetRoleIcon(ICON_MOTOR, (MotorRpm > 0U) ? 1U : 0U);
+  SetRoleIcon(ICON_CLOCK, (RemActive != 0U) ? 1U : 0U);
+  SetRoleIcon(ICON_ARROW, (AppMode == APP_RUNNING) ? 1U : 0U);
+  SetRoleIcon(ICON_WARN, 0U);
+  SetRoleIcon(ICON_SENSOR, (SensorValid != 0U) ? 1U : 0U);
+
+  /* ---- Set Speed：编辑态（FIELD_SPEED）闪烁，否则常显 ---- */
+  if (!(SettingActive && SettingField == FIELD_SPEED && BlinkOn == 0U))
+  {
+    DrawNumberRL(FieldLayout[FLD_SET_SPEED].first,
+                 FieldLayout[FLD_SET_SPEED].len, ConfigRpm);
+  }
+
+  /* ---- Set Time：H/M/S 分区闪烁（当前编辑子字段） ---- */
+  f = FieldLayout[FLD_SET_TIME].first;
+  if (!(SettingActive && SettingField == FIELD_TIME_H && BlinkOn == 0U))
+  {
+    DrawNumberRL(f, 4U, ConfigHours);
+  }
+  if (!(SettingActive && SettingField == FIELD_TIME_M && BlinkOn == 0U))
+  {
+    DrawTwoDigits((uint8_t)(f + 4U), ConfigMin);
+  }
+  if (!(SettingActive && SettingField == FIELD_TIME_S && BlinkOn == 0U))
+  {
+    DrawTwoDigits((uint8_t)(f + 6U), ConfigSec);
+  }
+
+  /* ---- Instant Speed：P4 接入真实测速后替换为实测值（当前为模型转速） ---- */
+  DrawNumberRL(FieldLayout[FLD_INST_SPEED].first,
+               FieldLayout[FLD_INST_SPEED].len, MotorRpm);
+
+  /* ---- Instant Temp：PT1000 插入才显示（SensorValid 由 P4 采样更新；当前未接入→熄灭） ---- */
+  if (SensorValid != 0U)
+  {
+    DrawNumberRL(FieldLayout[FLD_INST_TEMP].first,
+                 FieldLayout[FLD_INST_TEMP].len, 8888U);  /* 占位：P4 后改实时温度 */
+  }
+
+  /* ---- Remaining Time：STANDBY=0；RUNNING/PAUSED=冻结/递减值 ---- */
+  DrawTimeField(FieldLayout[FLD_REM_TIME].first, RemHours, RemMin, RemSec);
+
+  /* 缓冲内容有变化才置脏（避免每 50ms 全量串行写屏阻塞主循环） */
+  if (memcmp(LcdRam, LcdRamPrev, HT1623_RAM_NIBBLES) != 0)
+  {
+    memcpy(LcdRamPrev, LcdRam, HT1623_RAM_NIBBLES);
+    LcdDirty = 1U;
+  }
+}
+
+/**
+ * @brief  LCD 业务刷新任务（50ms）：
+ *         自动模式：重建整屏缓冲并写屏；手动调试模式：仅按脏标记送屏
  * @param  None
  * @return None
  */
 static void Task_LCD(void)
 {
+  if (LcdManual != 0U)
+  {
+    if (LcdDirty != 0U)
+    {
+      HT1623_WriteRam(0U, LcdRam, HT1623_RAM_NIBBLES);
+      LcdDirty = 0U;
+    }
+    return;
+  }
+
+  RefreshDisplay();
   if (LcdDirty != 0U)
   {
     HT1623_WriteRam(0U, LcdRam, HT1623_RAM_NIBBLES);
@@ -922,7 +1573,7 @@ static uint16_t GetTargetDutyPermille(void)
   /* 电机/新 LUT 未标定前占空比强制为 0，电机不动作 */
   return PWM_INACTIVE_PERMILLE;
 #else
-  if (AppMode == APP_MODE_RUNNING)
+  if (AppMode == APP_RUNNING)
   {
     uint8_t dutyPct = RpmToDutyPercent(MotorRpm);
     return (uint16_t)dutyPct * 10U;
@@ -933,16 +1584,20 @@ static uint16_t GetTargetDutyPermille(void)
 
 /**
  * @brief  返回应用模式枚举对应的可读字符串名称
- * @param  mode: 应用模式（APP_MODE_STOPPED / APP_MODE_RUNNING）
+ * @param  mode: 应用模式（APP_STANDBY / APP_RUNNING / APP_PAUSED）
  * @return 模式名称字符串
  */
 static const char* GetModeName(AppMode_t mode)
 {
-  if (mode == APP_MODE_RUNNING)
+  if (mode == APP_RUNNING)
   {
     return "RUNNING";
   }
-  return "STOPPED";
+  if (mode == APP_PAUSED)
+  {
+    return "PAUSED";
+  }
+  return "STANDBY";
 }
 
 /**
@@ -955,14 +1610,224 @@ static void EC11_Config(void)
   GPIO_InitTypeDef GPIO_InitStructure;
 
   RCC_AHBPeriphClockCmd(RCC_AHBPeriph_GPIOC, ENABLE);
+  RCC_AHBPeriphClockCmd(RCC_AHBPeriph_GPIOA, ENABLE);
+  RCC_AHBPeriphClockCmd(RCC_AHBPeriph_GPIOD, ENABLE);
 
+  /* EC11 A/B/KEY：PC5/PC3/PC4，高有效（外部 10k 下拉），下拉输入 */
   GPIO_InitStructure.GPIO_Pin = EC11_PIN_A | EC11_PIN_B | EC11_PIN_KEY;
   GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
   GPIO_InitStructure.GPIO_Speed = GPIO_Speed_Level_2;
   GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
   GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_DOWN;
   GPIO_Init(EC11_GPIO_PORT, &GPIO_InitStructure);
+
+  /* 开始键 PA2 / 停止键 PD7：低有效（外部 10k 上拉），内部上拉输入 */
+  GPIO_InitStructure.GPIO_Pin = KEY_START_PIN;
+  GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+  GPIO_Init(KEY_START_GPIO_PORT, &GPIO_InitStructure);
+
+  GPIO_InitStructure.GPIO_Pin = KEY_STOP_PIN;
+  GPIO_Init(KEY_STOP_GPIO_PORT, &GPIO_InitStructure);
 }
+
+/* ====================== ADS1115（I2C 0x48）最小驱动 ======================
+   新板：PA1=SCL / PA3=SDA（AF0，外部 R14/R20 4.7k 上拉）
+   AIN0=PT1000 温度分压、AIN1=电机光耦测速 SPEED_SW（R16 1k 上拉）
+   仅实现单次转换轮询，用于驱动链/信号验证；P4 再扩展连续采样 */
+#define ADS_I2C          I2C
+#define ADS_I2C_TIMING   0x00201D2BU   /* 借 EVAL sEE 时序(48MHz SYSCLK) */
+#define ADS_ADDR_W       0x90U         /* 0x48<<1 写 */
+#define ADS_ADDR_R       0x91U         /* 0x48<<1|1 读 */
+#define ADS_REG_CONV     0x00U
+#define ADS_REG_CONFIG   0x01U
+/* 配置：OS=启动单次转换 + MUX + PGA=±6.144V(000,允许0~5V) + 单次模式 + DR=860SPS + 比较器关 */
+#define ADS_CFG_MUX_AIN0 0x4000U
+#define ADS_CFG_MUX_AIN1 0x5000U
+#define ADS_CFG_SINGLE   0x0100U
+#define ADS_CFG_DR_860   0x00E0U
+
+/**
+ * @brief  I2C + ADS1115 初始化（新板 PA1/PA3，AF0）
+ * @param  None
+ * @return None
+ */
+static void I2C_ADS1115_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStructure;
+  I2C_InitTypeDef I2C_InitStructure;
+
+  RCC_I2CCLKConfig(RCC_I2C1CLK_SYSCLK);
+  RCC_AHBPeriphClockCmd(RCC_AHBPeriph_GPIOA, ENABLE);
+  RCC_APBPeriph1ClockCmd(RCC_APBPeriph1_I2C, ENABLE);
+
+  GPIO_PinAFConfig(GPIOA, GPIO_PinSource1, GPIO_AF_0);
+  GPIO_PinAFConfig(GPIOA, GPIO_PinSource3, GPIO_AF_0);
+  GPIO_InitStructure.GPIO_Pin = GPIO_Pin_1 | GPIO_Pin_3;
+  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;
+  GPIO_InitStructure.GPIO_Speed = GPIO_Speed_2MHz;
+  GPIO_InitStructure.GPIO_OType = GPIO_OType_OD;
+  GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_NOPULL;
+  GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+  I2C_InitStructure.I2C_Mode = I2C_Mode_I2C;
+  I2C_InitStructure.I2C_AnalogFilter = I2C_AnalogFilter_Enable;
+  I2C_InitStructure.I2C_DigitalFilter = 0x00;
+  I2C_InitStructure.I2C_OwnAddress1 = 0x00;
+  I2C_InitStructure.I2C_Ack = I2C_Ack_Enable;
+  I2C_InitStructure.I2C_AcknowledgedAddress = I2C_AcknowledgedAddress_7bit;
+  I2C_InitStructure.I2C_Timing = ADS_I2C_TIMING;
+  I2C_Init(ADS_I2C, &I2C_InitStructure);
+  I2C_Cmd(ADS_I2C, ENABLE);
+}
+
+/**
+ * @brief  等待 I2C 标志（带超时）
+ * @param  flag: I2C_ISR_* 标志
+ * @return 0=OK 1=超时
+ */
+static uint8_t Ads_WaitFlag(uint32_t flag)
+{
+  uint32_t t = 0xFFFFFU;
+  while (I2C_GetFlagStatus(ADS_I2C, flag) == RESET)
+  {
+    if (--t == 0U) return 1U;
+  }
+  return 0U;
+}
+
+/**
+ * @brief  写 ADS1115 寄存器：pointer + 2 字节数据（触发单次转换）
+ * @param  reg: 寄存器地址
+ * @param  val: 16 位配置值
+ * @return 0=OK 1=失败
+ */
+static uint8_t Ads_WriteReg(uint8_t reg, uint16_t val)
+{
+  uint8_t buf[3];
+  buf[0] = reg;
+  buf[1] = (uint8_t)(val >> 8);
+  buf[2] = (uint8_t)(val & 0xFFU);
+
+  I2C_TransferHandling(ADS_I2C, ADS_ADDR_W, 3U, I2C_AutoEnd_Mode, I2C_Generate_Start_Write);
+  for (uint8_t i = 0U; i < 3U; i++)
+  {
+    if (Ads_WaitFlag(I2C_ISR_TXIS)) return 1U;
+    I2C_SendData(ADS_I2C, buf[i]);
+  }
+  if (Ads_WaitFlag(I2C_ISR_STOPF)) return 1U;
+  I2C_ClearFlag(ADS_I2C, I2C_ICR_STOPCF);
+  return 0U;
+}
+
+/**
+ * @brief  写 ADS1115 指针寄存器（后续读转换结果用）
+ * @param  reg: 指针目标寄存器
+ * @return 0=OK 1=失败
+ */
+static uint8_t Ads_SetPointer(uint8_t reg)
+{
+  I2C_TransferHandling(ADS_I2C, ADS_ADDR_W, 1U, I2C_AutoEnd_Mode, I2C_Generate_Start_Write);
+  if (Ads_WaitFlag(I2C_ISR_TXIS)) return 1U;
+  I2C_SendData(ADS_I2C, reg);
+  if (Ads_WaitFlag(I2C_ISR_STOPF)) return 1U;
+  I2C_ClearFlag(ADS_I2C, I2C_ICR_STOPCF);
+  return 0U;
+}
+
+/**
+ * @brief  读 2 字节转换结果（需先 SetPointer(CONV)）
+ * @param  None
+ * @return 16 位转换值；失败返回 0xFFFF
+ */
+static uint16_t Ads_ReadConv(void)
+{
+  uint16_t v = 0xFFFFU;
+
+  I2C_TransferHandling(ADS_I2C, ADS_ADDR_R, 2U, I2C_AutoEnd_Mode, I2C_Generate_Start_Read);
+  for (uint8_t i = 0U; i < 2U; i++)
+  {
+    if (Ads_WaitFlag(I2C_ISR_RXNE)) return v;
+    if (i == 0U)
+    {
+      v = (uint16_t)((uint16_t)I2C_ReceiveData(ADS_I2C) << 8);
+    }
+    else
+    {
+      v |= I2C_ReceiveData(ADS_I2C);
+    }
+  }
+  Ads_WaitFlag(I2C_ISR_STOPF);
+  I2C_ClearFlag(ADS_I2C, I2C_ICR_STOPCF);
+  return v;
+}
+
+/**
+ * @brief  粗延时（约 ms 级，用于等待 ADS1115 转换完成）
+ * @param  ms: 毫秒数
+ * @return None
+ */
+static void Ads_DelayMs(uint32_t ms)
+{
+  volatile uint32_t i;
+  volatile uint32_t n = ms;
+  while (n > 0U)
+  {
+    for (i = 0U; i < 9000U; i++)
+    {
+      (void)i;
+    }
+    n--;
+  }
+}
+
+/**
+ * @brief  读取指定通道一次单次转换结果（AIN0=PT1000, AIN1=光耦测速）
+ * @param  ch: 0=AIN0, 1=AIN1
+ * @return 原始 ADC 值（0xFFFF=错误）
+ */
+static uint16_t Ads_ReadCh(uint8_t ch)
+{
+  static const uint16_t mux[4] = { 0x4000U, 0x5000U, 0x6000U, 0x7000U }; /* AIN0..3 vs GND */
+  uint16_t cfg;
+
+  if (ch > 3U)
+  {
+    return 0xFFFFU;
+  }
+  cfg = (uint16_t)(0x8000U | ADS_CFG_SINGLE | ADS_CFG_DR_860 | mux[ch]); /* OS=1 触发单次转换 */
+
+  if (Ads_WriteReg(ADS_REG_CONFIG, cfg)) return 0xFFFFU;  /* 触发单次转换 */
+  Ads_DelayMs(10U);                                       /* 等转换完成（860SPS≈1.16ms，余量给足） */
+  if (Ads_SetPointer(ADS_REG_CONV)) return 0xFFFFU;
+  return Ads_ReadConv();
+}
+
+#if (BOOT_TACH_LOOP == 1U)
+/**
+ * @brief  上电即循环打印 AIN1 电机反馈（死循环，无需 PC 输入）
+ *         静止无输出；电平跳变打印 E<边沿号>；每 256 次采样(~1s)打印一次统计
+ * @param  None
+ * @return None（不返回）
+ */
+static void BootTachLoop(void)
+{
+  uint16_t v[4];
+  uint8_t i;
+
+  printf("\r\n[TACH BOOT LOOP] 4 通道轮询（每行约 0.2s）：转动光栅看哪一路 conv 大幅跳变\r\n");
+  while (1U)
+  {
+    for (i = 0U; i < 4U; i++)
+    {
+      v[i] = Ads_ReadCh(i);
+    }
+    printf("\r\nAIN0=%5u AIN1=%5u AIN2=%5u AIN3=%5u%s",
+           (unsigned)v[0], (unsigned)v[1], (unsigned)v[2], (unsigned)v[3],
+           ((v[0] | v[1] | v[2] | v[3]) == 0xFFFFU) ? " (err)" : "");
+    Ads_DelayMs(150U);
+  }
+}
+#endif /* BOOT_TACH_LOOP */
 
 /* ====================== HT1623 驱动实现 ====================== */
 
@@ -1343,14 +2208,21 @@ void SysTick_Handler(void)
   */
 int fputc(int ch, FILE *f)
 {
+  uint32_t guard;
+
   /* Place your implementation of fputc here */
 
   /* e.g. write a character to the USART */
   UART_SendData(EVAL_COM1, (uint8_t) ch);
 
-  /* Loop until transmit data register is empty */
+  /* Loop until transmit data register is empty（带超时防外部串扰把打印卡死） */
+  guard = 200000U;
   while (UART_GetFlagStatus(EVAL_COM1, UART_FLAG_TC) == RESET)
   {
+    if (--guard == 0U)
+    {
+      break;
+    }
   }
 
   return ch;
