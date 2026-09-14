@@ -68,11 +68,19 @@
 #define HT1623_SEG_COUNT    29U
 #define HT1623_RAM_NIBBLES  (HT1623_SEG_COUNT * 2U)   /* 58 个 nibble */
 
-/* ============ ADS1115（I2C 0x48；R2：通道归属以飞线修复后实测为准，单点修改） ============ */
+/* ============ ADS1115（I2C 0x48；AIN0/AIN1=PT1000（图纸核实 2026-09-14），温度换算待实现） ============ */
 #define ADS1115_ADDR_W  0x90U      /* 0x48<<1 写 */
 #define ADS1115_ADDR_R  0x91U      /* 0x48<<1|1 读 */
 #define ADS_CH_TEMP     0U         /* AIN0 = PT1000 温度（名义，待实测） */
-#define ADS_CH_SPEED    1U         /* AIN1 = 光耦测速 SPEED_SW（名义，待实测） */
+#define ADS_CH_SPEED    1U         /* AIN1（历史诊断，shell tach）；测速实际走 PB4，见下 */
+
+/* ============ 测速 SPEED_SW（U15 速度检测 3P 座；与 USART1_RX 同网络 → PB4，图纸核实 2026-09-14） ============ */
+#define SPEED_PPR              18U      /* A10 实测：18 计数/圈（2026-09-15 标定：1圈18、2圈36、7圈126） */
+#define SPEED_WINDOW_MS       500U      /* 计数窗口 ms（PPR=18：100 RPM ≈ 15 计数/窗口；联调可调） */
+#define SPEED_EXTI_LINE        EXTI_Line4
+#define SPEED_EXTI_IRQN        EXTI4_IRQn
+#define SPEED_EXTI_PORT_SOURCE EXTI_PortSourceGPIOB
+#define SPEED_EXTI_PIN_SOURCE  EXTI_PinSource4   /* PB4：已由 COM1 初始化为 UART1_RX，EXTI 挂同脚不重配 */
 
 /* ============ Flash 存储（末页 128B 磨损均衡；格式见 flash_wear.h） ============ */
 #define FLASH_SAVE_PAGE_ADDR ((uint32_t)0x08003F80)

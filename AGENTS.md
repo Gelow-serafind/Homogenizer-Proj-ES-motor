@@ -1,71 +1,42 @@
 # AGENTS.md
 
-本文件为 Codex (Codex.ai/code) 在此仓库中工作提供指导。
+本文件为 AI 助手（Codex / Claude / Copilot 等）提供仓库导航。**强制约束以 `CLAUDE.md` 为准**（架构守则、编码规范、开发流程）；需求/架构/测试以 `doc/` 文档体系为唯一权威。
 
 ## 项目概述
 
-匀浆机电机控制器固件，基于 HK32F0301MF4P7C (ARM Cortex-M0)。商用闭源项目。所有应用逻辑集中在单文件 `Proj/src/main.c` 中。
+匀浆机电机控制器固件（商用闭源），芯片 HK32F0301MF4P7C（Cortex-M0，48MHz，16KB Flash / 4KB SRAM，TSSOP20，5V 供电）。
+2026-09-14 已完成模块化重构：业务不再集中在 `main.c`，改为 `Proj/app/` 应用框架（见 commit f436df7）。
 
 ## 构建
 
-- **IDE**：Keil MDK-ARM，打开 `Proj/MDK-ARM/Project.uvprojx`
-- **编译器**：ARMCLANG V6.19
-- **输出**：`Proj/MDK-ARM/Objects/Project.axf`（调试）、`Project.hex`（烧录）
-- **目标芯片**：HK32F0301MF4P7C
+- IDE：Keil MDK-ARM 打开 `Proj/MDK-ARM/Project.uvprojx`（ARMCLANG V6.22，保持 `-Oz`，Flash 余量紧张）
+- 产物：`Proj/MDK-ARM/Objects/Project.axf`（调试）/ `Project.hex`（烧录）；无命令行构建
+- 无 Keil 环境时可用 clang `-fsyntax-only` 做语法级校验（命令模板见仓库提交历史）
 
-无命令行构建方式，只能通过 Keil IDE 编译。
+## 目录与架构
 
-## 架构
+- `Proj/src/main.c`：仅 `App_Init() + App_Run()`；`hk32f0301mxxc_it.c`：仅异常向量
+- `Proj/app/inc`、`Proj/app/src`：9 业务模块 + 4 芯片驱动 + shell 框架
+  - 业务：event_bus / app_state / display / button / motor / speed_sensor / temp_sensor / timer / storage
+  - 驱动：ht1623 / ads1115 / ec11 / flash_wear
+  - 框架：`app.c`（10 任务调度表 + SysTick 1ms）、`uart_cmd.c`（shell）、`app_cfg.h`（周期/常量/引脚集中）
+- 通信：事件总线（16 条环形队列）+ 白名单直调（仅 app_state → 模块 get/set）；ISR 禁止投递事件
+- Keil 工程新增 .c 文件需同步 `Project.uvprojx`
 
-### 任务调度器
+## 硬件速查（2026-09-15；完整网络表见 `doc/原理图网络连接说明_V1.0.md`）
 
-基于 `Task_t` 数组的协作式多任务调度（`main.c:352-358`）。每个任务有周期（ms）和处理函数。`SysTick_Handler`（1ms）递减各任务的倒计时；主循环轮询，倒计时归零时执行对应处理函数：
+- PWM：PD6 = TIM1_CH2（10kHz，高电平=通电）；电机 24V 低边斩波；TIM2、TIM6 空闲
+- 旋钮 EC11：A=PC5、B=PC3、KEY=PC4（高有效，外部下拉）；EXTI5/EXTI3 双边沿硬件捕获
+- START=PA2（高有效）、STOP=PD7（低有效）；轮询消抖
+- 屏 HT1623：CS=PD3、RD=PD2、WR=PD1、DATA=PC6、IRQ=PC7（不用）
+- I2C AF0：SCL=PA1、SDA=PA3；ADS1115 0x48；AIN0/AIN1 = PT1000
+- UART1：TX=PD4、RX=PB4（115200）；**PB4 与 SPEED_SW 同网络**
+- 测速：U15(3P) SPEED_SW → PB4/EXTI4 单边沿计数；**18 计数/圈（已标定）**；编码器与 USB-TTL 不可同时接
+- SWD：PD5=SWDIO / PB5=SWCLK（勿动；禁止 IOMUX 重映射）
+- Flash 存储：末页 128B 磨损均衡（`0x08003F80`，16 槽 × 8B）
 
-| 任务 | 周期 | 职责 |
-|------|------|------|
-| `Task_Encoder` | 2ms | EC11 A/B 4倍频解码 + 按键消抖/长按检测 |
-| `Task_UartCmd` | 2ms | UART 接收轮询、行编辑、命令分发 |
-| `Task_App` | 10ms | 状态机：旋钮增量处理、启停、电机转速斜坡 |
-| `Task_PWM` | 5ms | `DutyChanged` 置位时将新占空比应用到 TIM1 CH2 |
-| `Task_TM1729` | 50ms | LCD 显示缓冲刷新 |
+## 当前状态与待办（2026-09-15）
 
-### 状态机
-
-双模式系统（`AppMode_t`）：`APP_MODE_STOPPED` / `APP_MODE_RUNNING`。长按 3 秒切换模式。`ConfigRpm` 为目标转速，`MotorRpm` 为实际输出转速（每 10ms 以 50 RPM 步进逼近目标）。
-
-### 关键数据流
-
-1. EC11 旋钮旋转 → `EncoderPosition` 增量 → `Task_App` 中调整 `ConfigRpm`
-2. `ConfigRpm` 变更 → 写入 Flash 持久化（磨损均衡，末页 128 字节，32 个 slot）
-3. `ConfigRpm` → `MotorRpm` 斜坡 → `RpmToDutyPercent()` 查表线性插值 → PWM 占空比（反相：100% - duty%）
-4. `MotorRpm` 或 `ConfigRpm` → TM1729 5 位数码管显示
-
-### UART 命令系统
-
-环形缓冲区接收（`uartRxRing`，64 字节），支持行编辑和命令表（`cmdTable`）。命令：`help`/`h`、`speed <rpm>`、`start`、`pause`、`status`。提示符：`homogenizer > `。
-
-### 硬件引脚映射
-
-- EC11：PC3 (A)、PC4 (B)、PC5 (KEY，低电平有效)
-- PWM：PD2 (TIM1_CH2, 17.57kHz, AF3)
-- LCD：PC6 (SCL)、PC7 (SDA) — 软件模拟 TM1729 协议
-- UART：USART1 (`EVAL_COM1`)，115200 8N1
-
-### RPM-占空比查表
-
-静态数组 `RpmDutyLUT`（`main.c:110-148`）映射 RPM → 占空比（存储值 ×10，线性插值）。范围：0–25000 RPM。11000 RPM 以下为实测数据，以上为线性外推。
-
-### Flash 磨损均衡
-
-末页 128 字节地址 `0x08003F80`，32 个 slot 各 4 字节。上电时从末向前扫描最后有效记录；变更时写入下一个空闲 slot；写满后整页擦除重新开始。
-
-## SDK 兼容性注意事项
-
-HK32 SDK 中 `Libraries/HK32F0301MxxC_StdPeriph_Driver/inc/hk32f0301mxxc_def.h` 的 `NOP()` 宏必须识别 `__ARMCC_VERSION` 以兼容 ARM Compiler 6——原始代码仅检测 `__CC_ARM`。详见 `Proj/MDK-ARM/README_ARMCOMPILER6_FIX.md`。
-
-## 关键约束
-
-- PWM **反相**输出：占空比存储为 `(100% - 占空比百分比) × 10` 千分比，使用 `TIM_OCMode_PWM2` + `TIM_OCPolarity_Low`。0% 占空比意味着满输出。
-- 编码器 4 倍频解码（每个边沿都计数），增量缓冲区有 ±120 饱和限制。
-- 按键消抖：3 次稳定判定；长按阈值：3000ms。
-- 旋钮步进：1000 RPM（常规），最小 5000 RPM；0 ↔ 5000 之间跳变。
+- 已上板验证：shell / 显示 / 旋钮编辑 / 启停 / 倒计时归零 / Flash 记忆 / 旋钮 EXTI / 测速链路 + PPR
+- 主线待办：测速接入业务（屏显实测 RPM、A12 到达判定）→ PT1000 温度链路 → 图标/字段校准 → 新电机 LUT 标定后解除 `MOTOR_DUTY_CLAMP`
+- 文档：`doc/` 六份体系 + `doc/原理图网络连接说明_V1.0.md`（新增网络表）

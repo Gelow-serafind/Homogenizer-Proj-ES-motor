@@ -76,9 +76,9 @@ doc/*.md                        # 六份文档体系（见上）
 ## 5. 硬件事实速查（勿凭记忆修改）
 
 - **MCU**：HK32F0301MF4P7C（Cortex-M0，TSSOP20，5V 供电）；SWD：PD5=SWDIO、PB5=SWCLK（勿动）。
-- **引脚**：PWM=PD6(TIM1_CH2,AF3,**10kHz**,ARR=4799,高电平=通电)；EC11 A/B/键=PC5/PC3/PC4（**高有效**，下拉）；START=PA2、STOP=PD7（**低有效**，上拉）；屏 HT1623：CS=PD3、RD=PD2、WR=PD1、DATA=PC6、IRQ=PC7；I2C：SCL=PA1、SDA=PA3（AF0），ADS1115 地址 0x48；UART1：TX=PD4、RX=PB4（115200 8N1）。
+- **引脚**：PWM=PD6(TIM1_CH2,AF3,**10kHz**,ARR=4799,高电平=通电)；EC11 A/B/键=PC5/PC3/PC4（**高有效**，下拉）；START=PA2、STOP=PD7（**低有效**，上拉）；屏 HT1623：CS=PD3、RD=PD2、WR=PD1、DATA=PC6、IRQ=PC7；I2C：SCL=PA1、SDA=PA3（AF0），ADS1115 地址 0x48；UART1：TX=PD4、RX=PB4（115200 8N1；**PB4 与 SPEED_SW 同网络，见下**）。
 - **屏**：LVD13083AVTP1 + HT1623（48SEG×8COM，96×4 位 RAM）；命令：SYS_EN=0x01、LCD_ON=0x03、RC32K=0x18（量产切 XTAL32K=0x1C）；RAM nibble 映射 `addr=SEG*2+com/4`、`bit=com%4`，D0 先发；CS 帧间高电平 ≥700ns。
-- **ADC 通道**：PT1000/光耦测速分别接 ADS1115 两路模拟输入，**通道归属以硬件飞线修复后实测为准**（R2）；测速硬件链路当前未通（R1）。
+- **ADC/测速**：PT1000 经 R18/R19 接 ADS1115 AIN0/AIN1（R2）；**SPEED_SW（U15 速度检测 3P 座信号脚，R25 10k 上拉 +5V）与 USART1_RX 为同一网络 → PB4**（图纸核实 2026-09-14）——编码器与 USB-TTL 不可同时接（双驱动打架），编码器接入时串口 RX 受扰属正常；测速按 PB4/EXTI4 单边沿计数实现（**链路验证通 + 18 计数/圈标定完成 2026-09-15**；屏显/到达判定业务接入待后续）。
 - **Flash**：末页 128B（0x08003F80）磨损均衡；16 槽 × 8B `{magic,rpm,h,m,s,rsv}`；空槽=全 0xFF。
 - **编译**：无命令行构建，只能 Keil MDK 打开 `Proj/MDK-ARM/Project.uvprojx` 编译（ARMCLANG V6.22）；产物 `Objects/Project.axf` / `Project.hex`。
 - **已知硬件遗留**：VLCD 对比度（R5 0Ω→22k~47k）、U46 晶振不起振、个别段位疑虚焊——显示类问题先核对这三项再怀疑软件。
