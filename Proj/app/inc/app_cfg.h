@@ -33,7 +33,7 @@
 /* ============ PWM / 电机 ============ */
 #define PWM_TARGET_FREQ_HZ 10000UL      /* 电机控制频率 10kHz（硬件确认） */
 #define PWM_INACTIVE_PERMILLE   0U      /* 停机占空比 0% */
-#define MOTOR_DUTY_CLAMP        1U      /* 标定前电机强制不转；新 LUT 标定后置 0（P8） */
+#define MOTOR_DUTY_CLAMP        0U      /* 1=强制不转（防护）；0=按 LUT 输出（2026-09-15 起验证阶段，LUT=验证映射） */
 
 /* ============ 功能开关（标定/验证阶段） ============ */
 #define BOOT_TACH_LOOP          0U      /* 1=上电进入 AIN 通道测速调试循环（不启动 shell） */
