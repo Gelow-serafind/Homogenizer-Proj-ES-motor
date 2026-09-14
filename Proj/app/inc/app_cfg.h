@@ -1,0 +1,81 @@
+/*******************************************************************************
+* @filename:  app_cfg.h
+* @brief:     应用层集中配置：任务周期、业务常量（A1~A17 假设）、引脚/极性宏
+* @note        1. 假设常量集中于此，客户确认后单点修改（见 doc/产品认知摘要.md A1~A17）
+*              2. 按键/编码器/引脚极性只在此定义，禁止散落魔法值
+*              3. 本文件只含宏，不依赖任何 SDK 头
+*******************************************************************************/
+#ifndef APP_CFG_H
+#define APP_CFG_H
+
+/* ============ 任务周期（ms，架构第 6 节调度表） ============ */
+#define TASK_PERIOD_BUTTON_MS     2U    /* EC11 解码 + 三键消抖 */
+#define TASK_PERIOD_UART_MS       2U    /* shell 接收轮询 */
+#define TASK_PERIOD_APP_MS       10U    /* 主状态机 */
+#define TASK_PERIOD_TIMER_MS     10U    /* 倒计时节拍消费 */
+#define TASK_PERIOD_MOTOR_MS      5U    /* 斜坡 + 占空比应用（内部 2 分频 → 10ms 步进） */
+#define TASK_PERIOD_SPEED_MS     20U    /* 测速采样/窗口 */
+#define TASK_PERIOD_TEMP_MS     500U    /* 温度采样 */
+#define TASK_PERIOD_DISPLAY_MS   50U    /* 显示渲染 + 差分写屏 */
+#define TASK_PERIOD_STORAGE_MS   10U    /* Flash 分步写（每周期 ≤1 word） */
+#define TASK_PERIOD_HOUSEKEEP_MS 1000U  /* 秒节拍（EVT_1S） */
+
+/* ============ 业务常量（A 系列假设；确认后单点修改） ============ */
+#define RPM_MIN               100U      /* A1：转速下限（需求"100/200"未定，暂 100） */
+#define RPM_MAX              2000U      /* 转速上限（MOT-01） */
+#define RPM_STEP               10U      /* A6：旋钮分度 10 RPM */
+#define RPM_RAMP_STEP          10U      /* 每 10ms 平滑步进（1000 RPM/s） */
+#define TIME_HOUR_MAX        9999U      /* 倒计时小时上限 9999:59:59 */
+#define SETTING_TIMEOUT_MS   5000U      /* A15：编辑无操作 5s 自动确认 */
+#define BLINK_PERIOD_MS       500U      /* 编辑字段闪烁相位周期 */
+#define KEY_DEBOUNCE_TICKS      3U      /* 按键消抖：3 次稳定判定（2ms×3=6ms） */
+
+/* ============ PWM / 电机 ============ */
+#define PWM_TARGET_FREQ_HZ 10000UL      /* 电机控制频率 10kHz（硬件确认） */
+#define PWM_INACTIVE_PERMILLE   0U      /* 停机占空比 0% */
+#define MOTOR_DUTY_CLAMP        1U      /* 标定前电机强制不转；新 LUT 标定后置 0（P8） */
+
+/* ============ 功能开关（标定/验证阶段） ============ */
+#define BOOT_TACH_LOOP          0U      /* 1=上电进入 AIN 通道测速调试循环（不启动 shell） */
+#define TEMP_VALID_DETECT_EN    0U      /* 1=启用骨架版探头在位判定（P4 标定后启用） */
+
+/* ============ 引脚定义（新板 V1.0；禁止散落魔法值） ============ */
+/* EC11：A=PC5、B=PC3、KEY=PC4；公共端 5V + 外部 10k 下拉 → 高有效 */
+#define EC11_GPIO_PORT   GPIOC
+#define EC11_PIN_A       GPIO_Pin_5
+#define EC11_PIN_B       GPIO_Pin_3
+#define EC11_PIN_KEY     GPIO_Pin_4
+#define EC11_KEY_ACTIVE_HIGH   1U
+/* START=PA2 / STOP=PD7；外部 10k 上拉 → 低有效 */
+#define KEY_START_GPIO_PORT GPIOA
+#define KEY_START_PIN       GPIO_Pin_2
+#define KEY_STOP_GPIO_PORT  GPIOD
+#define KEY_STOP_PIN        GPIO_Pin_7
+#define KEY_ACTIVE_HIGH     0U
+
+/* HT1623 4 线串行：CS=PD3、RD=PD2、WR=PD1、DATA=PC6、IRQ=PC7（本版不用） */
+#define HT1623_GPIO_PORT GPIOD
+#define HT1623_PIN_CS    GPIO_Pin_3
+#define HT1623_PIN_RD    GPIO_Pin_2
+#define HT1623_PIN_WR    GPIO_Pin_1
+#define HT1623_PORT_DATA GPIOC
+#define HT1623_PIN_DATA  GPIO_Pin_6
+#define HT1623_PORT_IRQ  GPIOC
+#define HT1623_PIN_IRQ   GPIO_Pin_7
+
+/* 玻璃屏 SEG0..SEG28；HT1623 RAM = 96×4 位（nibble 地址 = SEG*2 + COM组） */
+#define HT1623_SEG_COUNT    29U
+#define HT1623_RAM_NIBBLES  (HT1623_SEG_COUNT * 2U)   /* 58 个 nibble */
+
+/* ============ ADS1115（I2C 0x48；R2：通道归属以飞线修复后实测为准，单点修改） ============ */
+#define ADS1115_ADDR_W  0x90U      /* 0x48<<1 写 */
+#define ADS1115_ADDR_R  0x91U      /* 0x48<<1|1 读 */
+#define ADS_CH_TEMP     0U         /* AIN0 = PT1000 温度（名义，待实测） */
+#define ADS_CH_SPEED    1U         /* AIN1 = 光耦测速 SPEED_SW（名义，待实测） */
+
+/* ============ Flash 存储（末页 128B 磨损均衡；格式见 flash_wear.h） ============ */
+#define FLASH_SAVE_PAGE_ADDR ((uint32_t)0x08003F80)
+#define FLASH_SAVE_SLOTS     16U
+#define FLASH_SAVE_SLOT_SIZE 8U
+
+#endif /* APP_CFG_H */

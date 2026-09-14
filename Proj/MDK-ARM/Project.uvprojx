@@ -341,7 +341,7 @@
               <MiscControls>-Oz</MiscControls>
               <Define>HK32F0301MXXC , HK32F0301MF4P7C,USE_HK32F0301MF4P7C_EVAL,USE_DEFAULT_TIMEOUT_CALLBACK</Define>
               <Undefine></Undefine>
-              <IncludePath>..\inc;..\src;..\..\Libraries\CMSIS\CM0\Core;..\..\Libraries\CMSIS\HK32F0301MxxC\Include;..\..\Libraries\CMSIS\HK32F0301MxxC\Source\ARM;..\..\Libraries\CMSIS\HK32F0301MxxC\Source;..\..\Libraries\HK32F0301MxxC_StdPeriph_Driver\inc;..\..\Libraries\HK32F0301MxxC_StdPeriph_Driver\src;..\..\Boards\Board_HK32F0301MF4P7C_EVAL\inc;..\..\Boards\Board_HK32F0301MF4P7C_EVAL\src</IncludePath>
+              <IncludePath>..\inc;..\src;..\app\inc;..\..\Libraries\CMSIS\CM0\Core;..\..\Libraries\CMSIS\HK32F0301MxxC\Include;..\..\Libraries\CMSIS\HK32F0301MxxC\Source\ARM;..\..\Libraries\CMSIS\HK32F0301MxxC\Source;..\..\Libraries\HK32F0301MxxC_StdPeriph_Driver\inc;..\..\Libraries\HK32F0301MxxC_StdPeriph_Driver\src;..\..\Boards\Board_HK32F0301MF4P7C_EVAL\inc;..\..\Boards\Board_HK32F0301MF4P7C_EVAL\src</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -409,6 +409,86 @@
               <FileName>hk32f0301mxxc_it.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\src\hk32f0301mxxc_it.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>App</GroupName>
+          <Files>
+            <File>
+              <FileName>app.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\app.c</FilePath>
+            </File>
+            <File>
+              <FileName>event_bus.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\event_bus.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_state.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\app_state.c</FilePath>
+            </File>
+            <File>
+              <FileName>display.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\display.c</FilePath>
+            </File>
+            <File>
+              <FileName>button.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\button.c</FilePath>
+            </File>
+            <File>
+              <FileName>motor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\motor.c</FilePath>
+            </File>
+            <File>
+              <FileName>speed_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\speed_sensor.c</FilePath>
+            </File>
+            <File>
+              <FileName>temp_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\temp_sensor.c</FilePath>
+            </File>
+            <File>
+              <FileName>timer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\timer.c</FilePath>
+            </File>
+            <File>
+              <FileName>storage.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\storage.c</FilePath>
+            </File>
+            <File>
+              <FileName>uart_cmd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\uart_cmd.c</FilePath>
+            </File>
+            <File>
+              <FileName>ht1623.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\ht1623.c</FilePath>
+            </File>
+            <File>
+              <FileName>ads1115.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\ads1115.c</FilePath>
+            </File>
+            <File>
+              <FileName>ec11.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\ec11.c</FilePath>
+            </File>
+            <File>
+              <FileName>flash_wear.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app\src\flash_wear.c</FilePath>
             </File>
           </Files>
         </Group>

@@ -18,8 +18,8 @@
 ### 1.1 模块归属
 
 - 新需求先落 `REQ`，再按《软件架构设计》第 12 节落点表映射到模块；**禁止**出现无归属模块的业务逻辑（尤其禁止堆在 `main.c`）。
-- 模块清单（`Proj/src/modules/`）：`event_bus`（信号流转核心）、`app_state`、`display`、`button`、`motor`、`speed_sensor`、`temp_sensor`、`timer`、`storage`。
-- 芯片级协议放 `Proj/src/drivers/`（ht1623、ads1115、ec11、flash_wear），驱动层不得含业务语义。
+- 模块清单（业务模块在 `Proj/app/src/`，头文件在 `Proj/app/inc/`）：`event_bus`（信号流转核心）、`app_state`、`display`、`button`、`motor`、`speed_sensor`、`temp_sensor`、`timer`、`storage`；框架入口/调度表在 `app.c`，调试 shell 在 `uart_cmd.c`。
+- 芯片级协议驱动（ht1623、ads1115、ec11、flash_wear）同样落在 `Proj/app/src/`，驱动层不得含业务语义。
 
 ### 1.2 信号流转机制（强制）
 
@@ -45,18 +45,20 @@
 - **ISR 最短**：SysTick 只做任务计数器递减与标志置位；禁止在 ISR 调用业务接口。
 - **volatile 纪律**：仅跨 ISR↔主循环的标志用 `volatile`；纯主循环变量不加。
 - **极性集中**：按键/编码器极性（旋钮高有效、START/STOP 低有效）只在 `app_cfg.h` 宏集中定义，禁止散落魔法值。
-- **假设常量集中**：A1~A17 相关常量（`RPM_MIN`、`RPM_STEP`、`TIME_HOUR_MAX`、`SETTING_TIMEOUT_MS`、`SPEED_PPR`、到达容差等）集中在 `Proj/inc/app_cfg.h`，确认后单点修改。
+- **假设常量集中**：A1~A17 相关常量（`RPM_MIN`、`RPM_STEP`、`TIME_HOUR_MAX`、`SETTING_TIMEOUT_MS`、`SPEED_PPR`、到达容差等）集中在 `Proj/app/inc/app_cfg.h`，确认后单点修改。
 - **内存与 Flash 预算**：16KB Flash，编译保持 `-Oz`；新增功能必须验证剩余空间（历史教训：L6406E 溢出）。
 - **删除 IOMUX 重映射**：严禁恢复 `GPIO_IOMUX_ChangePin(IOMUX_PIN11, IOMUX_PB5_SEL_PD2)`（会毁掉 SWCLK 烧录口）。
 
 ## 3. 目录结构约定
 
 ```
-Proj/src/main.c                 # 仅：系统初始化 + 任务调度表 + evt_bus_dispatch 编排
-Proj/src/hk32f0301mxxc_it.c     # 仅 SysTick
-Proj/inc/app_cfg.h              # 周期/假设常量/极性宏
-Proj/src/drivers/*.c            # 芯片级驱动（无业务）
-Proj/src/modules/*.c            # 9 个业务模块（含 event_bus）
+Proj/src/main.c                 # 仅 App_Init() + App_Run()（极简入口）
+Proj/src/hk32f0301mxxc_it.c     # 仅异常向量（业务 SysTick 在 app.c）
+Proj/app/inc/app_cfg.h          # 周期/假设常量/极性/引脚宏
+Proj/app/inc/*.h                # 全部头文件（模块/驱动/shell/app.h）
+Proj/app/src/app.c              # 任务调度表 + evt_bus_dispatch 编排（唯一编排点）
+Proj/app/src/*.c                # 9 个业务模块 + 4 个芯片驱动 + 调试 shell
+Proj/app/src/ht1623.c 等        # 芯片级驱动（无业务）
 doc/*.md                        # 六份文档体系（见上）
 ```
 
