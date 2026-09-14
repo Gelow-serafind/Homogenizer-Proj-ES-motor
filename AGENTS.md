@@ -25,18 +25,18 @@
 
 ## 硬件速查（2026-09-15；完整网络表见 `doc/原理图网络连接说明_V1.0.md`）
 
-- PWM：PD6 = TIM1_CH2（10kHz，高电平=通电）；电机 24V 低边斩波；TIM2、TIM6 空闲
+- PWM：PD6 = TIM1_CH2（10kHz，高电平=通电）；电机 24V 低边斩波；TIM2 空闲（TIM6=测速 µs 时基）
 - 旋钮 EC11：A=PC5、B=PC3、KEY=PC4（高有效，外部下拉）；EXTI5/EXTI3 双边沿硬件捕获
 - START=PA2（高有效）、STOP=PD7（低有效）；轮询消抖
 - 屏 HT1623：CS=PD3、RD=PD2、WR=PD1、DATA=PC6、IRQ=PC7（不用）
 - I2C AF0：SCL=PA1、SDA=PA3；ADS1115 0x48；AIN0/AIN1 = PT1000
 - UART1：TX=PD4、RX=PB4（115200）；**PB4 与 SPEED_SW 同网络**
-- 测速：U15(3P) SPEED_SW → PB4/EXTI4 单边沿计数；**18 计数/圈（已标定）**；编码器与 USB-TTL 不可同时接
+- 测速：U15(3P) SPEED_SW → PB4/EXTI4 周期法（TIM6 时基）；**18 计数/圈（已标定）；屏显实测 RPM 已接入**；编码器与 USB-TTL 不可同时接
 - SWD：PD5=SWDIO / PB5=SWCLK（勿动；禁止 IOMUX 重映射）
 - Flash 存储：末页 128B 磨损均衡（`0x08003F80`，16 槽 × 8B）
 
 ## 当前状态与待办（2026-09-15）
 
 - 已上板验证：shell / 显示 / 旋钮编辑 / 启停 / 倒计时归零 / Flash 记忆 / 旋钮 EXTI / 测速链路 + PPR
-- 主线待办：测速接入业务（屏显实测 RPM、A12 到达判定）→ PT1000 温度链路 → 图标/字段校准 → 新电机 LUT 实测标定回填（当前为验证映射，`MOTOR_DUTY_CLAMP` 已置 0 2026-09-15）
+- 主线待办：A12 到达判定接入（实测转速已可供）→ 速度环 PID（motor 消费 speed_sensor 反馈，后续方向）→ PT1000 温度链路 → 图标/字段校准 → 新电机 LUT 实测标定回填（当前为验证映射，`MOTOR_DUTY_CLAMP` 已置 0 2026-09-15）
 - 文档：`doc/` 六份体系 + `doc/原理图网络连接说明_V1.0.md`（新增网络表）

@@ -14,7 +14,7 @@
 #define TASK_PERIOD_APP_MS       10U    /* 主状态机 */
 #define TASK_PERIOD_TIMER_MS     10U    /* 倒计时节拍消费 */
 #define TASK_PERIOD_MOTOR_MS      5U    /* 斜坡 + 占空比应用（内部 2 分频 → 10ms 步进） */
-#define TASK_PERIOD_SPEED_MS     20U    /* 测速采样/窗口 */
+#define TASK_PERIOD_SPEED_MS     20U    /* 测速任务周期：周期法平均窗口 + EMA 滤波更新 */
 #define TASK_PERIOD_TEMP_MS     500U    /* 温度采样 */
 #define TASK_PERIOD_DISPLAY_MS   50U    /* 显示渲染 + 差分写屏 */
 #define TASK_PERIOD_STORAGE_MS   10U    /* Flash 分步写（每周期 ≤1 word） */
@@ -76,7 +76,9 @@
 
 /* ============ 测速 SPEED_SW（U15 速度检测 3P 座；与 USART1_RX 同网络 → PB4，图纸核实 2026-09-14） ============ */
 #define SPEED_PPR              18U      /* A10 实测：18 计数/圈（2026-09-15 标定：1圈18、2圈36、7圈126） */
-#define SPEED_WINDOW_MS       500U      /* 计数窗口 ms（PPR=18：100 RPM ≈ 15 计数/窗口；联调可调） */
+#define SPEED_TICK_US           4U      /* 脉冲时间戳分辨率（TIM6 时基，µs/计数） */
+#define SPEED_RPM_EMA_SHIFT     2U      /* RPM 一阶低通系数 α=1/(1<<shift)，20ms 更新一次 */
+#define SPEED_STALL_TIMEOUT_MS 200U     /* 无脉冲超时 → 停转归零（100 RPM 周期 33ms 的 6 倍余量） */
 #define SPEED_EXTI_LINE        EXTI_Line4
 #define SPEED_EXTI_IRQN        EXTI4_IRQn
 #define SPEED_EXTI_PORT_SOURCE EXTI_PortSourceGPIOB

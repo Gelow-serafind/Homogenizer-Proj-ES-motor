@@ -10,6 +10,7 @@
 #include "event_bus.h"
 #include "app_state.h"
 #include "motor.h"
+#include "speed_sensor.h"
 #include "temp_sensor.h"
 #include "timer.h"
 #include "display.h"
@@ -341,10 +342,9 @@ static void display_render(void)
     draw_two_digits((uint8_t)(f + 6U), cfgS);
   }
 
-  /* ---- Instant Speed：当前=电机输出模型；
-          P4 测速标定后切换为 speed_sensor_get_rpm() ---- */
+  /* ---- Instant Speed：实测转速（speed_sensor 周期法+滤波，20ms 定频维护）---- */
   draw_number_rl(fieldLayout[FLD_INST_SPEED].first,
-                 fieldLayout[FLD_INST_SPEED].len, motor_get_out_rpm());
+                 fieldLayout[FLD_INST_SPEED].len, speed_sensor_get_rpm());
 
   /* ---- Instant Temp：探头在位才显示（P4 前恒 0 → 熄灭）；有效时显占位 8888 ---- */
   if (temp_sensor_is_valid() != 0U)
