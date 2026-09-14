@@ -11,7 +11,7 @@
       <ToolsetNumber>0x4</ToolsetNumber>
       <ToolsetName>ARM-ADS</ToolsetName>
       <pArmCC>6220000::V6.22::ARMCLANG</pArmCC>
-      <pCCUsed>6190000::V6.19::ARMCLANG</pCCUsed>
+      <pCCUsed>6220000::V6.22::ARMCLANG</pCCUsed>
       <uAC6>1</uAC6>
       <TargetOption>
         <TargetCommonOption>
@@ -338,7 +338,7 @@
             <v6WtE>0</v6WtE>
             <v6Rtti>0</v6Rtti>
             <VariousControls>
-              <MiscControls></MiscControls>
+              <MiscControls>-Oz</MiscControls>
               <Define>HK32F0301MXXC , HK32F0301MF4P7C,USE_HK32F0301MF4P7C_EVAL,USE_DEFAULT_TIMEOUT_CALLBACK</Define>
               <Undefine></Undefine>
               <IncludePath>..\inc;..\src;..\..\Libraries\CMSIS\CM0\Core;..\..\Libraries\CMSIS\HK32F0301MxxC\Include;..\..\Libraries\CMSIS\HK32F0301MxxC\Source\ARM;..\..\Libraries\CMSIS\HK32F0301MxxC\Source;..\..\Libraries\HK32F0301MxxC_StdPeriph_Driver\inc;..\..\Libraries\HK32F0301MxxC_StdPeriph_Driver\src;..\..\Boards\Board_HK32F0301MF4P7C_EVAL\inc;..\..\Boards\Board_HK32F0301MF4P7C_EVAL\src</IncludePath>
