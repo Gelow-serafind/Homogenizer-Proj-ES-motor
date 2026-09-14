@@ -42,7 +42,7 @@
 - **命名**：模块前缀 + 蛇形（`display_set_icon`）；枚举 `xxx_t`；宏全大写。公共符号必须有模块前缀。
 - **static 前置声明**：被后置定义调用的 static 函数必须加前置原型（ARMCLANG 会报 implicit declaration，已踩过）。
 - **无阻塞**：禁止 `while(flag)` 死等、长 `for` 延时；等待类逻辑交给任务周期状态机。
-- **ISR 最短**：SysTick 只做任务计数器递减与标志置位；禁止在 ISR 调用业务接口。
+- **ISR 最短**：SysTick 只做任务计数器递减与标志置位；驱动级 EXTI ISR（先例：ec11 旋钮边沿捕获）只做 GPIO 采样/查表/计数；禁止在 ISR 调用业务接口或投递事件。
 - **volatile 纪律**：仅跨 ISR↔主循环的标志用 `volatile`；纯主循环变量不加。
 - **极性集中**：按键/编码器极性（旋钮高有效、START/STOP 低有效）只在 `app_cfg.h` 宏集中定义，禁止散落魔法值。
 - **假设常量集中**：A1~A17 相关常量（`RPM_MIN`、`RPM_STEP`、`TIME_HOUR_MAX`、`SETTING_TIMEOUT_MS`、`SPEED_PPR`、到达容差等）集中在 `Proj/app/inc/app_cfg.h`，确认后单点修改。

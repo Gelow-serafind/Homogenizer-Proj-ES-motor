@@ -1,7 +1,7 @@
 /*******************************************************************************
 * @filename:  uart_cmd.c
 * @brief:     调试 shell 实现（原 UART 命令系统迁移；命令语义不变）
-* @note       命令表：help/h、speed、time、start、stop、pause、pwm、adc、tach、status、lcd
+* @note       命令表：help/h、speed、time、start、stop、pause、pwm、adc、tach、knob、status、lcd
 *******************************************************************************/
 #include "main.h"
 #include <stdio.h>
@@ -10,6 +10,7 @@
 #include "ads1115.h"
 #include "app_state.h"
 #include "display.h"
+#include "ec11.h"
 #include "motor.h"
 #include "timer.h"
 #include "uart_cmd.h"
@@ -42,6 +43,7 @@ static void cmd_stop(const char* args);
 static void cmd_pwm(const char* args);
 static void cmd_adc(const char* args);
 static void cmd_tach(const char* args);
+static void cmd_knob(const char* args);
 static void cmd_status(const char* args);
 static void cmd_lcd(const char* args);
 
@@ -57,6 +59,7 @@ static const CmdEntry_t cmdTable[] = {
   { "pwm",    cmd_pwm       },
   { "adc",    cmd_adc       },
   { "tach",   cmd_tach      },
+  { "knob",   cmd_knob      },
   { "status", cmd_status    },
   { "lcd",    cmd_lcd       },
   { NULL,     NULL          }
@@ -477,6 +480,21 @@ static void cmd_tach(const char* args)
   printf("Tach done: edges=%lu high=%lu low=%lu min=%u max=%u\r\n",
          (unsigned long)edges, (unsigned long)hcnt, (unsigned long)lcnt,
          (unsigned)vmin, (unsigned)vmax);
+}
+
+/**
+  * @brief  knob：旋钮捕获统计（自上次执行以来，读取后清零）
+  * @note   验证：先执行一次清零 → 匀速转过 N 格 → 再执行；
+  *         edge4x 应≈4N（每格 4 边沿）、detent 应=N；isr 与 edge4x 差值=毛刺触发
+  */
+static void cmd_knob(const char* args)
+{
+  ec11_stats_t st;
+
+  (void)args;
+  ec11_take_stats(&st);
+  printf("\r\n[KNOB] isr=%lu edge4x=%lu detent=%ld (自上次执行以来；已清零)\r\n",
+         (unsigned long)st.isrCount, (unsigned long)st.edgeCount, (long)st.detentNet);
 }
 
 /**
