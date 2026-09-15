@@ -118,6 +118,7 @@ static uint8_t lcdRamPrev[HT1623_RAM_NIBBLES];   /* 上次送屏镜像（差分�
 static uint8_t lcdDirty  = 0U;
 static uint8_t lcdManual = 0U;                   /* 1=lcd 调试命令手动模式 */
 static uint8_t blinkPhase = 0U;                  /* 编辑字段闪烁相位（EVT_BLINK_TOGGLE 同步） */
+static uint16_t dispSpeed = 0U;                  /* Instant Speed 显示平滑值（真实值低通版） */
 
 /* static 前置原型 */
 static void lcd_set_segment(uint8_t seg, uint8_t com, uint8_t on);
@@ -129,6 +130,7 @@ static void draw_blank_digits(uint8_t first, uint8_t len);
 static void draw_number_rl(uint8_t first, uint8_t len, uint32_t value);
 static void draw_two_digits(uint8_t first, uint8_t v);
 static void draw_time_field(uint8_t first, uint16_t h, uint8_t m, uint8_t s);
+static void display_smooth_speed(void);
 static void display_render(void);
 
 /* ====================== 底层段位操作 ====================== */
@@ -284,6 +286,37 @@ static void draw_time_field(uint8_t first, uint16_t h, uint8_t m, uint8_t s)
   draw_two_digits((uint8_t)(first + 6U), s);
 }
 
+/**
+  * @brief  Instant Speed 显示层二次平滑（50ms 一拍，display_render 内调用）
+  * @note   变速跟随：|原始−显示| > DISP_SPEED_JUMP_RPM → 每拍逼近一半（调速/启动不迟钝）；
+  *         稳态小偏差 → 每拍仅跟随 1/DISP_SPEED_SS_DIV（τ≈0.4s，视觉稳定不跳字）；
+  *         原始=0（停转）→ 立即归零（A9 衰减显示末端）；
+  *         仅影响显示值：PID 反馈与 A12 到达判定仍用 speed_sensor 原始值
+  */
+static void display_smooth_speed(void)
+{
+  uint16_t raw = speed_sensor_get_rpm();
+  int32_t  d   = (int32_t)raw - (int32_t)dispSpeed;
+
+  if (raw == 0U)
+  {
+    dispSpeed = 0U;
+  }
+  else if (d > (int32_t)DISP_SPEED_JUMP_RPM)
+  {
+    dispSpeed += (uint16_t)((d + 1) / 2);
+  }
+  else if (d < -(int32_t)DISP_SPEED_JUMP_RPM)
+  {
+    dispSpeed -= (uint16_t)((-d + 1) / 2);
+  }
+  else
+  {
+    /* 稳态：小偏差强平滑（d/DIV 向零截断自带 ≈±DIV RPM 显示死区，防跳字） */
+    dispSpeed = (uint16_t)((int32_t)dispSpeed + d / (int32_t)DISP_SPEED_SS_DIV);
+  }
+}
+
 /* ====================== 业务渲染 ====================== */
 
 /**
@@ -312,9 +345,12 @@ static void display_render(void)
   app_state_get_cfg_time(&cfgH, &cfgM, &cfgS);
   timer_get_rem(&remH, &remM, &remS);
 
+  /* Instant Speed 平滑更新放最前：图标与字段同用当拍值（无帧滞后） */
+  display_smooth_speed();
+
   /* ---- 图标 ---- */
-  /* 圆图标 = 实测转速 > 0（闭环后数据源切 speed_sensor，真实转动状态；2026-09-15） */
-  set_role_icon((uint8_t)ROLE_MOTOR, (speed_sensor_get_rpm() > 0U) ? 1U : 0U);
+  /* 圆图标 = 显示平滑转速 > 0（闭环后数据源切 speed_sensor，真实转动状态；2026-09-15） */
+  set_role_icon((uint8_t)ROLE_MOTOR, (dispSpeed > 0U) ? 1U : 0U);
   set_role_icon((uint8_t)ROLE_CLOCK, timer_is_active());
   set_role_icon((uint8_t)ROLE_ARROW, (mode == APP_RUNNING) ? 1U : 0U);
   set_role_icon((uint8_t)ROLE_WARN, 0U);
@@ -342,9 +378,11 @@ static void display_render(void)
     draw_two_digits((uint8_t)(f + 6U), cfgS);
   }
 
-  /* ---- Instant Speed：实测转速（speed_sensor 周期法+滤波，20ms 定频维护）---- */
+  /* ---- Instant Speed：实测转速 + 显示层二次平滑（真实值低通版，稳态不跳字） ----
+        变速跟随：|原始−显示| > DISP_SPEED_JUMP_RPM 快速跟随（/2）；否则每拍 1/8 强平滑；
+        停转（原始=0）立即归零。控制链（PID/A12）仍用 speed_sensor 原始值，不受影响。 */
   draw_number_rl(fieldLayout[FLD_INST_SPEED].first,
-                 fieldLayout[FLD_INST_SPEED].len, speed_sensor_get_rpm());
+                 fieldLayout[FLD_INST_SPEED].len, dispSpeed);
 
   /* ---- Instant Temp：探头在位才显示（P4 前恒 0 → 熄灭）；有效时显占位 8888 ---- */
   if (temp_sensor_is_valid() != 0U)

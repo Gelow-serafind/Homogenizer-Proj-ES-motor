@@ -48,6 +48,10 @@
 #define REACH_TOLERANCE_RPM      50U      /* |实际−目标| ≤ 50 RPM（A12） */
 #define REACH_HOLD_MS          1000U      /* 持续 ≥ 1s（A12） */
 
+/* ============ 屏显转速二次平滑（display 层；不影响 speed_sensor 原始反馈→PID/A12） ============ */
+#define DISP_SPEED_JUMP_RPM     30U      /* |原始−显示| > 该值 → 快速跟随（每拍 /2，调速不迟钝） */
+#define DISP_SPEED_SS_DIV        8U      /* 稳态平滑：每拍仅跟随 1/8 偏差（50ms 拍，τ≈0.4s；防跳字） */
+
 /* ============ 功能开关（标定/验证阶段） ============ */
 #define BOOT_TACH_LOOP          0U      /* 1=上电进入 AIN 通道测速调试循环（不启动 shell） */
 #define TEMP_VALID_DETECT_EN    0U      /* 1=启用骨架版探头在位判定（P4 标定后启用） */
