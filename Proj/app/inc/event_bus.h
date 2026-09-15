@@ -35,6 +35,7 @@ typedef enum {
   EVT_MOD_APP_STATE = 0,
   EVT_MOD_DISPLAY,
   EVT_MOD_TIMER,
+  EVT_MOD_MOTOR,        /* 速度环：订阅 EVT_SPEED_UPDATED（回调缓存实测转速） */
   EVT_MOD_COUNT
 } evt_module_t;
 

@@ -4,9 +4,14 @@
 * @note        1. 0% 占空比 = 电机停；LUT 值 = duty% × 10，线性插值
 *              2. 斜坡每 10ms 步进 RPM_RAMP_STEP（5ms 任务内部 2 分频，保持原时序）
 *              3. MOTOR_DUTY_CLAMP=1 强制 0%（防护）；当前=0 且 LUT 为验证映射（2026-09-15）
+*              4. 速度环（2026-09-15）：FF(LUT 前馈) + PI 反馈，20ms 节拍，Q8 定点；
+*                 反馈经订阅 EVT_SPEED_UPDATED 缓存（motor_on_event），无模块间直调；
+*                 参考轨迹=原斜坡 outRpm（启动无阶跃、A9 衰减显示）；
+*                 输出限幅 SPEED_LOOP_DUTY_MAX（兼堵转保护）；SPEED_LOOP_EN=0 回退开环
 *******************************************************************************/
 #include "main.h"
 #include "app_cfg.h"
+#include "event_bus.h"
 #include "motor.h"
 
 /* 【验证映射 2026-09-15】简单线性表（非标定值）：先行验证电机转动/方向/驱动链；
@@ -21,19 +26,32 @@ static const uint16_t RpmDutyLUT[][2] = {
 
 static uint16_t pwmPeriod   = 0U;      /* ARR 值 */
 static uint16_t targetRpm   = 0U;      /* 闭环目标（RUNNING 时 = cfg_rpm） */
-static uint16_t outRpm      = 0U;      /* 输出模型（ramp） */
+static uint16_t outRpm      = 0U;      /* 参考轨迹（ramp，1000 RPM/s） */
 static uint8_t  enabled     = 0U;      /* 1=RUNNING 使能输出 */
-static uint8_t  dutyDirty   = 1U;      /* 占空比待刷新 */
+static uint8_t  dutyDirty   = 1U;      /* 占空比待刷新（开环回退路径） */
 static uint16_t dutyPermille = 0U;     /* 当前已应用占空比 */
 static uint8_t  manualMode  = 0U;      /* 手动标定模式（不覆盖 CCR） */
 static uint8_t  rampDiv     = 0U;      /* 5ms → 10ms 分频 */
+
+/* 速度环状态（SPEED_LOOP_EN=1；主循环独占，无 ISR 共享） */
+static uint8_t  pidDiv      = 0U;      /* 5ms → 20ms PID 节拍分频 */
+static uint16_t measRpm     = 0U;      /* 反馈缓存（motor_on_event 刷新） */
+static int32_t  iAcc        = 0L;      /* 积分累加器（Q8；±I_MAX<<8 限幅） */
+static uint16_t kpQ8        = SPEED_LOOP_KP_Q8;   /* P 系数（Q8，可经 shell 整定） */
+static uint16_t kiQ8        = SPEED_LOOP_KI_Q8;   /* I 系数（Q8） */
+static int32_t  lastFF      = 0L;      /* 最近 FF/P/I 分量（‰，shell pid 诊断） */
+static int32_t  lastP       = 0L;
+static int32_t  lastI       = 0L;
 
 /* static 前置原型 */
 static void     motor_tim1_config(void);
 static void     motor_set_duty(uint16_t permille);
 static uint8_t  motor_rpm_to_duty_percent(uint16_t rpm);
-static uint16_t motor_calc_duty(void);
 static void     motor_ramp_step(void);
+static void     motor_speed_loop_tick(void);
+#if (SPEED_LOOP_EN == 0U)
+static uint16_t motor_calc_duty(void);
+#endif
 
 /**
   * @brief  TIME 基与 PWM 输出配置（PD6 = TIM1_CH2 AF3，10kHz）
@@ -141,9 +159,10 @@ static uint8_t motor_rpm_to_duty_percent(uint16_t rpm)
 }
 
 /**
-  * @brief  计算当前应输出的占空比（千分比）
+  * @brief  计算当前应输出的占空比（千分比）——开环回退路径（SPEED_LOOP_EN=0）
   * @note   MOTOR_DUTY_CLAMP=1 时恒 0（标定前电机不动作）
   */
+#if (SPEED_LOOP_EN == 0U)
 static uint16_t motor_calc_duty(void)
 {
   if (MOTOR_DUTY_CLAMP != 0U)
@@ -157,6 +176,7 @@ static uint16_t motor_calc_duty(void)
   }
   return PWM_INACTIVE_PERMILLE;
 }
+#endif
 
 /**
   * @brief  斜坡推进：10ms 步进 RPM_RAMP_STEP（原 Task_App 行为）
@@ -196,6 +216,61 @@ static void motor_ramp_step(void)
   dutyDirty = 1U;
 }
 
+/**
+  * @brief  速度环单拍（20ms）：FF(LUT) + PI，限幅输出
+  * @note   err = 参考轨迹 − 实测；Q8 定点无浮点（Cortex-M0）；
+  *         低速反馈断续时缓存值即最新可观测值（EMA 已平滑）；
+  *         积分限幅抗饱和；输出限幅兼堵转保护
+  */
+static void motor_speed_loop_tick(void)
+{
+  int32_t err;
+  int32_t p;
+  int32_t i;
+  int32_t duty;
+  int32_t ff;
+  int32_t iMaxQ8 = (int32_t)SPEED_LOOP_I_MAX << 8;
+
+  err = (int32_t)outRpm - (int32_t)measRpm;
+
+  /* P 分量：Q8 系数 × 误差 → ‰ */
+  p = ((int32_t)kpQ8 * err) >> 8;
+
+  /* I 分量：Q8 累加 + 限幅（抗饱和） */
+  iAcc += (int32_t)kiQ8 * err;
+  if (iAcc > iMaxQ8)
+  {
+    iAcc = iMaxQ8;
+  }
+  if (iAcc < -iMaxQ8)
+  {
+    iAcc = -iMaxQ8;
+  }
+  i = iAcc >> 8;
+
+  /* FF（LUT 前馈，‰）+ P + I → 限幅输出（0~100% 物理边界，无额外人为限制） */
+  ff   = (int32_t)motor_rpm_to_duty_percent(outRpm) * 10;
+  duty = ff + p + i;
+  if (duty < 0)
+  {
+    duty = 0;
+  }
+  if (duty > (int32_t)SPEED_LOOP_DUTY_MAX)
+  {
+    duty = (int32_t)SPEED_LOOP_DUTY_MAX;
+  }
+
+  lastFF = ff;
+  lastP  = p;
+  lastI  = i;
+
+  if ((uint16_t)duty != dutyPermille)
+  {
+    dutyPermille = (uint16_t)duty;
+    motor_set_duty(dutyPermille);
+  }
+}
+
 void motor_init(void)
 {
   targetRpm    = 0U;
@@ -205,14 +280,25 @@ void motor_init(void)
   dutyPermille = 0U;
   manualMode   = 0U;
   rampDiv      = 0U;
+  pidDiv       = 0U;
+  measRpm      = 0U;
+  iAcc         = 0L;
+  kpQ8         = SPEED_LOOP_KP_Q8;
+  kiQ8         = SPEED_LOOP_KI_Q8;
+  lastFF       = 0L;
+  lastP        = 0L;
+  lastI        = 0L;
 
   motor_tim1_config();
   motor_set_duty(PWM_INACTIVE_PERMILLE);
+
+  /* 订阅实测转速：motor_on_event 只缓存（回调只读纪律） */
+  (void)evt_bus_subscribe(EVT_MOD_MOTOR, EVT_SPEED_UPDATED);
 }
 
 void motor_ops(void)
 {
-  /* 5ms 任务内部 2 分频：斜坡保持原 10ms 步进节奏 */
+  /* 5ms 任务内部 2 分频：参考轨迹保持原 10ms 步进节奏 */
   rampDiv++;
   if (rampDiv >= 2U)
   {
@@ -225,41 +311,137 @@ void motor_ops(void)
     return;   /* 手动标定：不覆盖 CCR（motor_manual_off 恢复自动） */
   }
 
+#if (SPEED_LOOP_EN != 0U)
+  if (enabled == 0U)
+  {
+    /* 停机：输出立即归零 + 积分清零（不依赖 20ms 节拍） */
+    if (dutyPermille != PWM_INACTIVE_PERMILLE)
+    {
+      dutyPermille = PWM_INACTIVE_PERMILLE;
+      motor_set_duty(dutyPermille);
+    }
+    iAcc   = 0L;
+    lastFF = 0L;
+    lastP  = 0L;
+    lastI  = 0L;
+    pidDiv = 0U;
+    return;
+  }
+
+  /* 5ms → 20ms 分频：PID 与测速反馈同频 */
+  pidDiv++;
+  if (pidDiv >= SPEED_LOOP_PERIOD_DIV)
+  {
+    pidDiv = 0U;
+    motor_speed_loop_tick();
+  }
+#else
+  /* 开环回退：LUT 直接映射（标定/对比验证） */
   if (dutyDirty != 0U)
   {
     dutyPermille = motor_calc_duty();
     motor_set_duty(dutyPermille);
     dutyDirty = 0U;
   }
+#endif
 }
 
 void motor_set_target(uint16_t rpm)
 {
   targetRpm = rpm;
   enabled = 1U;
+  pidDiv  = 0U;
+  /* 注意：不清积分！A14 运行中 ±10 RPM 实时步进时积分承担着稳态负载补偿，
+     清零会导致输出阶跃→转速明显掉速→再慢慢积回（表现为调速时大幅抖动）。
+     积分有 SPEED_LOOP_I_MAX 限幅自校正，目标大幅变化时会被误差自然拉回；
+     停机（motor_stop/halt）才清零。 */
 }
 
 void motor_stop(void)
 {
-  enabled = 0U;   /* outRpm 由斜坡自然衰减（显示衰减效果，A9） */
+  enabled = 0U;   /* 参考轨迹由斜坡自然衰减（A9 显示）；输出由 ops 立即归零 */
+  iAcc    = 0L;
 }
 
 void motor_halt(void)
 {
-  enabled = 0U;
+  enabled  = 0U;
   targetRpm = 0U;
-  outRpm = 0U;
+  outRpm   = 0U;
+  iAcc     = 0L;
+  measRpm  = 0U;
   dutyDirty = 1U;
 }
 
 uint16_t motor_get_out_rpm(void)
 {
-  return outRpm;
+  return outRpm;   /* 参考轨迹（ramp）值 */
 }
 
 uint16_t motor_get_duty_permille(void)
 {
   return dutyPermille;
+}
+
+uint16_t motor_get_meas_rpm(void)
+{
+  return measRpm;
+}
+
+/**
+  * @brief  订阅回调（EVT_SPEED_UPDATED）：只刷新反馈缓存
+  * @note   回调只读纪律：不 post、不长操作；动作由 motor_ops 20ms 节拍消费
+  */
+void motor_on_event(evt_type_t type, uint16_t val)
+{
+  (void)type;
+  measRpm = val;
+}
+
+uint16_t motor_get_kp_q8(void)
+{
+  return kpQ8;
+}
+
+uint16_t motor_get_ki_q8(void)
+{
+  return kiQ8;
+}
+
+void motor_set_kp_q8(uint16_t v)
+{
+  if (v <= 4095U)
+  {
+    kpQ8 = v;
+  }
+}
+
+void motor_set_ki_q8(uint16_t v)
+{
+  if (v <= 4095U)
+  {
+    kiQ8 = v;
+  }
+}
+
+/**
+  * @brief  速度环诊断快照（shell pid 命令；纯读）
+  */
+void motor_pid_get_info(motor_pid_info_t *info)
+{
+  if (info == 0)
+  {
+    return;
+  }
+
+  info->target_rpm      = targetRpm;
+  info->ref_rpm         = outRpm;
+  info->meas_rpm        = measRpm;
+  info->ff_permille     = (int16_t)lastFF;
+  info->p_permille      = (int16_t)lastP;
+  info->i_permille      = (int16_t)lastI;
+  info->i_acc_permille  = (int16_t)(iAcc >> 8);
+  info->duty_permille   = dutyPermille;
 }
 
 void motor_manual_duty(uint16_t permille)

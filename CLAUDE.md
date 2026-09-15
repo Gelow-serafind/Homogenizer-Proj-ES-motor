@@ -78,7 +78,8 @@ doc/*.md                        # 六份文档体系（见上）
 - **MCU**：HK32F0301MF4P7C（Cortex-M0，TSSOP20，5V 供电）；SWD：PD5=SWDIO、PB5=SWCLK（勿动）。
 - **引脚**：PWM=PD6(TIM1_CH2,AF3,**10kHz**,ARR=4799,高电平=通电)；EC11 A/B/键=PC5/PC3/PC4（**高有效**，下拉）；START=PA2、STOP=PD7（**低有效**，上拉）；屏 HT1623：CS=PD3、RD=PD2、WR=PD1、DATA=PC6、IRQ=PC7；I2C：SCL=PA1、SDA=PA3（AF0），ADS1115 地址 0x48；UART1：TX=PD4、RX=PB4（115200 8N1；**PB4 与 SPEED_SW 同网络，见下**）。
 - **屏**：LVD13083AVTP1 + HT1623（48SEG×8COM，96×4 位 RAM）；命令：SYS_EN=0x01、LCD_ON=0x03、RC32K=0x18（量产切 XTAL32K=0x1C）；RAM nibble 映射 `addr=SEG*2+com/4`、`bit=com%4`，D0 先发；CS 帧间高电平 ≥700ns。
-- **ADC/测速**：PT1000 经 R18/R19 接 ADS1115 AIN0/AIN1（R2）；**SPEED_SW（U15 速度检测 3P 座信号脚，R25 10k 上拉 +5V）与 USART1_RX 为同一网络 → PB4**（图纸核实 2026-09-14）——编码器与 USB-TTL 不可同时接（双驱动打架），编码器接入时串口 RX 受扰属正常；测速=PB4/EXTI4 周期法（TIM6 4µs 时基，20ms 滤波）——**链路验证通 + 18 计数/圈标定 + 屏显实测转速已接入（2026-09-15）**；到达判定（A12）接入待后续。
+- **ADC/测速**：PT1000 经 R18/R19 接 ADS1115 AIN0/AIN1（R2）；**SPEED_SW（U15 速度检测 3P 座信号脚，R25 10k 上拉 +5V）与 USART1_RX 为同一网络 → PB4**（图纸核实 2026-09-14）——编码器与 USB-TTL 不可同时接（双驱动打架），编码器接入时串口 RX 受扰属正常；测速=PB4/EXTI4 周期法（TIM6 4µs 时基，20ms 滤波）——**链路验证通 + 18 计数/圈标定 + 屏显实测转速已接入（2026-09-15）**；**到达判定（A12）已切换实测转速（2026-09-15）**：|实际−目标|≤`REACH_TOLERANCE_RPM`(50) 持续 `REACH_HOLD_MS`(1s)。
+- **速度环（2026-09-15 落地，上板整定中）**：`motor` = FF(LUT 前馈) + PI 反馈，20ms 节拍（5ms 任务内部 4 分频，与测速同频），Q8 定点；反馈经事件总线订阅 `EVT_SPEED_UPDATED` 缓存（`motor_on_event` 只读，无模块间直调）；参考轨迹=原 ramp（启动无阶跃/A9 衰减显示）；积分限幅抗饱和；输出仅限物理边界 0~100%（`SPEED_LOOP_DUTY_MAX`=1000‰，2026-09-15 用户决策：不设人为限制，此前 300‰ 下实测只到 ≈720 RPM 撞顶）；`SPEED_LOOP_EN=0` 回退开环；Kp=64/Ki=6（Q8）为初值，shell `pid/pidkp/pidki` 上板整定后回填 `app_cfg.h`（编码器占用 PB4 时无 shell，面板测 + 改宏重烧）。
 - **Flash**：末页 128B（0x08003F80）磨损均衡；16 槽 × 8B `{magic,rpm,h,m,s,rsv}`；空槽=全 0xFF。
 - **编译**：无命令行构建，只能 Keil MDK 打开 `Proj/MDK-ARM/Project.uvprojx` 编译（ARMCLANG V6.22）；产物 `Objects/Project.axf` / `Project.hex`。
 - **已知硬件遗留**：VLCD 对比度（R5 0Ω→22k~47k）、U46 晶振不起振、个别段位疑虚焊——显示类问题先核对这三项再怀疑软件。
@@ -86,7 +87,8 @@ doc/*.md                        # 六份文档体系（见上）
 ## 6. 关键业务约束（与需求一致）
 
 - 状态机：`STANDBY/RUNNING/PAUSED` + 编辑叠加层（`SPEED→TIME_H→TIME_M→TIME_S` 循环）；5s 无操作自动确认；任意闪烁状态按 START 立即启动。
-- 倒计时：**实际转速到达目标后才开始**（|实际−目标|≤50 RPM 持续 1s，A12）；暂停冻结；改过时间重载、未改续用（A11）；归零→停机回待机（A4）。
+- 倒计时：**实际转速到达目标后才开始**（|实际−目标|≤50 RPM 持续 1s，A12，已按实测转速实现 2026-09-15）；暂停冻结；改过时间重载、未改续用（A11）；归零→停机回待机（A4）。
+- 圆图标：=实测转速>0（2026-09-15 数据源切 speed_sensor）；停止后随惯性转动自然熄灭。
 - 转速：100~2000 RPM（A1），步进 10；转速/H 钳位，M/S 循环（A6）。
 - 图标：十字架=PT1000 在位（A5）、时钟=倒计时中、圆=转速>0、▲=运行常亮（A7）、感叹号恒灭（A8）、隔断线常显。
 - 参数确认即写 Flash（单击/5s/START，A15）；`MOTOR_DUTY_CLAMP` 已于 2026-09-15 置 0——当前 `RpmDutyLUT` 是**验证用简单映射**（15%~30%，非标定值），P8 需实测回填后再交付。

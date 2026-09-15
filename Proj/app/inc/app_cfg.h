@@ -35,6 +35,19 @@
 #define PWM_INACTIVE_PERMILLE   0U      /* 停机占空比 0% */
 #define MOTOR_DUTY_CLAMP        0U      /* 1=强制不转（防护）；0=按 LUT 输出（2026-09-15 起验证阶段，LUT=验证映射） */
 
+/* ============ 速度环（REQ-MOT-01：FF(LUT 前馈) + PI 反馈，Q8 定点，2026-09-15） ============ */
+#define SPEED_LOOP_EN            1U      /* 1=闭环（FF+PI）；0=回退开环 LUT（对比/标定用） */
+#define SPEED_LOOP_PERIOD_DIV    4U      /* motor_ops 5ms × 4 = 20ms PID 节拍（与测速反馈同频） */
+#define SPEED_LOOP_KP_Q8        64U      /* P 系数 Q8（=0.25‰/RPM）；上板整定后可改（shell pidkp） */
+#define SPEED_LOOP_KI_Q8         6U      /* I 系数 Q8（≈0.023‰/RPM/拍）；上板整定后可改（shell pidki） */
+#define SPEED_LOOP_I_MAX       700U      /* 积分限幅（‰，抗饱和；放至可覆盖全输出范围，避免稳态缺口补不满） */
+#define SPEED_LOOP_DUTY_MAX   1000U      /* 输出限幅（‰）：物理边界 0~100%，不设人为限制（2026-09-15 用户决策，
+                                             原 300‰→500‰ 均撞顶，彻底放开） */
+
+/* ============ A12 到达判定（实测转速数据源，2026-09-15） ============ */
+#define REACH_TOLERANCE_RPM      50U      /* |实际−目标| ≤ 50 RPM（A12） */
+#define REACH_HOLD_MS          1000U      /* 持续 ≥ 1s（A12） */
+
 /* ============ 功能开关（标定/验证阶段） ============ */
 #define BOOT_TACH_LOOP          0U      /* 1=上电进入 AIN 通道测速调试循环（不启动 shell） */
 #define TEMP_VALID_DETECT_EN    0U      /* 1=启用骨架版探头在位判定（P4 标定后启用） */

@@ -3,13 +3,15 @@
 * @brief:     主状态机实现（原 Task_App/AppStart/AppStop/ApplyKnobDelta 迁移，行为等价）
 * @note        1. 事件回调只置标志，动作在 app_state_ops 消费（回调只读纪律）；
 *              2. 白名单直调：motor_set_target/motor_stop/timer_* /storage_request_save；
-*              3. 到达判定当前用电机输出模型（P4 测速标定后切换 speed_sensor 反馈 + A12 容差）
+*              3. 到达判定（A12，2026-09-15）：实测转速 |实际−目标| ≤ REACH_TOLERANCE_RPM
+*                 持续 REACH_HOLD_MS（数据源 = speed_sensor，速度环接入后开环模型不再代表真实转速）
 *******************************************************************************/
 #include "main.h"
 #include "app_cfg.h"
 #include "event_bus.h"
 #include "storage.h"
 #include "motor.h"
+#include "speed_sensor.h"
 #include "timer.h"
 #include "app_state.h"
 
@@ -28,6 +30,7 @@ static uint8_t  timeEdited = 0U;   /* 本次编辑会话是否改过时间（A11
 
 /* 运行辅助 */
 static uint8_t  reached    = 0U;   /* 已发布到达事件（对应原 RemActive 启动） */
+static uint16_t reachHoldMs = 0U;  /* A12：误差入容差累计时间（持续 ≥1s 判定到达） */
 static uint16_t blinkMs    = 0U;   /* 500ms 闪烁相位计数 */
 static uint8_t  blinkPhase = 0U;
 
@@ -112,6 +115,7 @@ static void app_do_start(void)
   /* 否则：PAUSED 未改时间 → 保留冻结的倒计时继续（timer 侧不动） */
 
   reached = 0U;                  /* 到达目标转速后再开始递减（A12） */
+  reachHoldMs = 0U;
   appMode = APP_RUNNING;
   motor_set_target(cfgRpm);      /* 白名单直调 */
   (void)evt_bus_post(EVT_MODE_CHANGED, (uint16_t)appMode);
@@ -132,6 +136,7 @@ static void app_do_stop(void)
   {
     appMode = APP_PAUSED;
     reached = 0U;                /* 冻结：timer 保留剩余值，恢复后重新到达再继续 */
+    reachHoldMs = 0U;
     timer_pause();
     motor_stop();
     (void)evt_bus_post(EVT_MODE_CHANGED, (uint16_t)appMode);
@@ -215,6 +220,7 @@ void app_state_init(void)
   idleMs     = 0U;
   timeEdited = 0U;
   reached    = 0U;
+  reachHoldMs = 0U;
   blinkMs    = 0U;
   blinkPhase = 0U;
   evStart    = 0U;
@@ -305,6 +311,7 @@ void app_state_ops(void)
   {
     appMode = APP_STANDBY;
     reached = 0U;
+    reachHoldMs = 0U;
     motor_halt();                /* 立即清零输出模型（同原 CountdownTick 行为） */
     (void)evt_bus_post(EVT_MODE_CHANGED, (uint16_t)appMode);
   }
@@ -367,15 +374,28 @@ void app_state_ops(void)
     }
   }
 
-  /* ---- 到达判定：RUNNING 且输出模型到达设置值且设定时间非零 → 通知 timer 开始递减
-          （A12 完整容差+保持时间在 P4 测速接入后实现；当前等价原 MotorRpm==ConfigRpm） ---- */
+  /* ---- 到达判定（A12 完整实现，2026-09-15）：实测转速 |实际−目标| ≤ 容差且持续 ≥ 保持时间
+          → 通知 timer 开始递减；数据源 = speed_sensor（白名单 get，闭环后真实转速） ---- */
   if ((appMode == APP_RUNNING) && (reached == 0U))
   {
-    if ((motor_get_out_rpm() == cfgRpm) && (cfgRpm > 0U) &&
-        (((uint16_t)(cfgH | cfgM | cfgS)) != 0U))
+    if ((cfgRpm > 0U) && (((uint16_t)(cfgH | cfgM | cfgS)) != 0U))
     {
-      reached = 1U;
-      (void)evt_bus_post(EVT_REACH_TARGET, cfgRpm);
+      int32_t err = (int32_t)cfgRpm - (int32_t)speed_sensor_get_rpm();
+
+      if ((err >= -(int32_t)REACH_TOLERANCE_RPM) && (err <= (int32_t)REACH_TOLERANCE_RPM))
+      {
+        reachHoldMs += TASK_PERIOD_APP_MS;
+        if (reachHoldMs >= REACH_HOLD_MS)
+        {
+          reached = 1U;
+          reachHoldMs = 0U;
+          (void)evt_bus_post(EVT_REACH_TARGET, cfgRpm);
+        }
+      }
+      else
+      {
+        reachHoldMs = 0U;
+      }
     }
   }
 }

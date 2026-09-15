@@ -10,6 +10,7 @@
 #include "app_state.h"
 #include "display.h"
 #include "timer.h"
+#include "motor.h"
 
 #define EVT_QUEUE_SIZE 16U
 
@@ -32,6 +33,7 @@ static const evt_handler_t modHandlers[EVT_MOD_COUNT] = {
   app_state_on_event,
   display_on_event,
   timer_on_event,
+  motor_on_event,        /* 速度环：缓存实测转速（回调只读） */
 };
 
 void evt_bus_init(void)

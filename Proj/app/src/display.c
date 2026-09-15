@@ -9,7 +9,6 @@
 #include "ht1623.h"
 #include "event_bus.h"
 #include "app_state.h"
-#include "motor.h"
 #include "speed_sensor.h"
 #include "temp_sensor.h"
 #include "timer.h"
@@ -314,7 +313,8 @@ static void display_render(void)
   timer_get_rem(&remH, &remM, &remS);
 
   /* ---- 图标 ---- */
-  set_role_icon((uint8_t)ROLE_MOTOR, (motor_get_out_rpm() > 0U) ? 1U : 0U);
+  /* 圆图标 = 实测转速 > 0（闭环后数据源切 speed_sensor，真实转动状态；2026-09-15） */
+  set_role_icon((uint8_t)ROLE_MOTOR, (speed_sensor_get_rpm() > 0U) ? 1U : 0U);
   set_role_icon((uint8_t)ROLE_CLOCK, timer_is_active());
   set_role_icon((uint8_t)ROLE_ARROW, (mode == APP_RUNNING) ? 1U : 0U);
   set_role_icon((uint8_t)ROLE_WARN, 0U);

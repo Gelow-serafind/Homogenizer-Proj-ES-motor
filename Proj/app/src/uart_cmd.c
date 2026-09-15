@@ -1,7 +1,8 @@
 /*******************************************************************************
 * @filename:  uart_cmd.c
 * @brief:     调试 shell 实现（原 UART 命令系统迁移；命令语义不变）
-* @note       命令表：help/h、speed、time、start、stop、pause、pwm、adc、tach、knob、status、lcd
+* @note       命令表：help/h、speed、time、start、stop、pause、pwm、adc、tach、knob、
+*              status、lcd、pid、pidkp、pidki（速度环整定）
 *******************************************************************************/
 #include "main.h"
 #include <stdio.h>
@@ -46,6 +47,9 @@ static void cmd_tach(const char* args);
 static void cmd_knob(const char* args);
 static void cmd_status(const char* args);
 static void cmd_lcd(const char* args);
+static void cmd_pid(const char* args);
+static void cmd_pidkp(const char* args);
+static void cmd_pidki(const char* args);
 
 /* 指令表：添加新指令只需在此增加 { "name", CallbackFn } 项 */
 static const CmdEntry_t cmdTable[] = {
@@ -62,6 +66,9 @@ static const CmdEntry_t cmdTable[] = {
   { "knob",   cmd_knob      },
   { "status", cmd_status    },
   { "lcd",    cmd_lcd       },
+  { "pid",    cmd_pid       },
+  { "pidkp",  cmd_pidkp     },
+  { "pidki",  cmd_pidki     },
   { NULL,     NULL          }
 };
 
@@ -390,6 +397,77 @@ static void cmd_pwm(const char* args)
   motor_manual_duty((uint16_t)val);
   printf("\r\nPWM: manual duty = %d/1000 (%d.%u%%)\r\n",
          val, val / 10, (unsigned)(val % 10));
+}
+
+/**
+  * @brief  pid：速度环诊断快照（目标/参考/实测/FF/P/I/积分/占空比与系数）
+  */
+static void cmd_pid(const char* args)
+{
+  motor_pid_info_t info;
+
+  (void)args;
+  motor_pid_get_info(&info);
+  printf("\r\nloop=%s tgt=%u ref=%u meas=%u | ff=%d p=%d i=%d iacc=%d | duty=%u permille\r\n",
+         (SPEED_LOOP_EN != 0U) ? "on" : "off",
+         (unsigned)info.target_rpm, (unsigned)info.ref_rpm, (unsigned)info.meas_rpm,
+         (int)info.ff_permille, (int)info.p_permille, (int)info.i_permille,
+         (int)info.i_acc_permille, (unsigned)info.duty_permille);
+  printf("kp(Q8)=%u ki(Q8)=%u imax=%u dmax=%u\r\n",
+         (unsigned)motor_get_kp_q8(), (unsigned)motor_get_ki_q8(),
+         (unsigned)SPEED_LOOP_I_MAX, (unsigned)SPEED_LOOP_DUTY_MAX);
+}
+
+/**
+  * @brief  pidkp <n>：设置 P 系数（Q8，0..4095；64=0.25‰/RPM）
+  */
+static void cmd_pidkp(const char* args)
+{
+  uint32_t v = 0U;
+  const char* p = args;
+
+  while (*p == ' ')
+  {
+    p++;
+  }
+  while ((*p >= '0') && (*p <= '9'))
+  {
+    v = v * 10U + (uint32_t)(*p - '0');
+    if (v > 4095U)
+    {
+      v = 4095U;
+    }
+    p++;
+  }
+
+  motor_set_kp_q8((uint16_t)v);
+  printf("\r\nKp(Q8) = %u\r\n", (unsigned)motor_get_kp_q8());
+}
+
+/**
+  * @brief  pidki <n>：设置 I 系数（Q8，0..4095；6≈0.023‰/RPM/拍）
+  */
+static void cmd_pidki(const char* args)
+{
+  uint32_t v = 0U;
+  const char* p = args;
+
+  while (*p == ' ')
+  {
+    p++;
+  }
+  while ((*p >= '0') && (*p <= '9'))
+  {
+    v = v * 10U + (uint32_t)(*p - '0');
+    if (v > 4095U)
+    {
+      v = 4095U;
+    }
+    p++;
+  }
+
+  motor_set_ki_q8((uint16_t)v);
+  printf("\r\nKi(Q8) = %u\r\n", (unsigned)motor_get_ki_q8());
 }
 
 /**
