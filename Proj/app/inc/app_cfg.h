@@ -55,6 +55,9 @@
 /* ============ 功能开关（标定/验证阶段） ============ */
 #define BOOT_TACH_LOOP          0U      /* 1=上电进入 AIN 通道测速调试循环（不启动 shell） */
 #define EC11_USE_EXTI           1U      /* 1=旋钮 PC5/PC3 双边沿 EXTI 捕获（推荐）；0=2ms 轮询回退 */
+#define TEMP_DISPLAY_PLACEHOLDER 1U     /* 1=温度显示固定占位值（探头硬件未到，2026-09-16 用户指令）；
+                                           0=显示真实测量值（探头到位后切 0，自动恢复拔出隐藏 REQ-DISP-06） */
+#define TEMP_PLACEHOLDER_T10    258U    /* 占位值：25.8℃（仅 TEMP_DISPLAY_PLACEHOLDER=1 时生效） */
 
 /* ============ 引脚定义（新板 V1.0；禁止散落魔法值） ============ */
 /* EC11：A=PC5、B=PC3、KEY=PC4；公共端 5V + 外部 10k 下拉 → 高有效 */

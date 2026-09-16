@@ -21,10 +21,6 @@ static uint8_t  tValid = 0U;
 static int16_t  tDeciC = 0;
 static uint8_t  tLogEn = 0U;        /* 调试：持续打印开关（shell templog） */
 
-/* 在位判定去抖（连续 2 次一致才切换，防拔插瞬态抖动） */
-static uint8_t  tValidPend = 0U;
-static uint8_t  tValidCnt  = 0U;
-
 /* IEC 60751 PT1000：R×10（Ω），0~300℃ 每 5℃；
    由 R(t)=1000×(1+3.9083e-3·t−5.775e-7·t²) 生成 */
 static const uint16_t RTableX10[61] = {
@@ -44,13 +40,11 @@ static uint16_t temp_raw_to_mv(uint16_t raw);
 
 void temp_sensor_init(void)
 {
-  tRawA0     = 0xFFFFU;
-  tRawA1     = 0xFFFFU;
-  tValid     = 0U;
-  tDeciC     = 0;
-  tLogEn     = 0U;
-  tValidPend = 0U;
-  tValidCnt  = 0U;
+  tRawA0 = 0xFFFFU;
+  tRawA1 = 0xFFFFU;
+  tValid = 0U;
+  tDeciC = 0;
+  tLogEn = 0U;
 }
 
 void temp_sensor_log_enable(uint8_t enable)
@@ -126,26 +120,14 @@ void temp_sensor_ops(void)
 
   den = (2L * (int32_t)a1) - (int32_t)a0;   /* 悬空≈0；插 25℃≈12106 */
 
-  /* 在位判定（去抖：连续 2 次一致才切换，500ms×2=1s 内完成） */
+  /* 在位判定（直接切换：500ms 采样本身即滤波；拔出/插入 den 差异巨大（−8 vs 12106）
+     无噪声误判风险；使拔插联动 ≤ 采样周期+显示刷新 ≈ 550ms，满足 REQ-TEMP-03 ≤1s） */
   {
     uint8_t nv = (den >= (int32_t)TEMP_DEN_MIN) ? 1U : 0U;
 
-    if (nv == tValidPend)
+    if (nv != tValid)
     {
-      if (tValidCnt < 2U)
-      {
-        tValidCnt++;
-      }
-    }
-    else
-    {
-      tValidPend = nv;
-      tValidCnt  = 1U;
-    }
-
-    if ((tValidCnt >= 2U) && (tValid != tValidPend))
-    {
-      tValid = tValidPend;
+      tValid = nv;
       (void)evt_bus_post((tValid != 0U) ? EVT_TEMP_VALID : EVT_TEMP_INVALID, 0U);
     }
   }

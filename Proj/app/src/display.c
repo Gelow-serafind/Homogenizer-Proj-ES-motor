@@ -77,9 +77,9 @@ static const uint8_t lcdDigitFont[11] = {
 
 /* ====================== 业务字段布局 / 图标角色绑定 ====================== */
 
-/* 玻璃 28 个数码位的业务字段布局（推断初值，实测玻璃丝印后校准改此表）：
+/* 玻璃 28 个数码位的业务字段布局（2026-09-16 实测最终确认：SetTime 2h24m33s 与温度 25.8 四路交叉验证）：
    位1-4 SetSpeed | 位5-12 SetTime(H4:M2:S2) | 位13-16 InstSpeed |
-   位17-20 InstTemp | 位21-28 RemTime(H4:M2:S2) */
+   位17-24 RemTime(H4:M2:S2 连续) | 位25-28 InstTemp */
 typedef enum {
   FLD_SET_SPEED = 0,
   FLD_SET_TIME,
@@ -96,9 +96,13 @@ static const struct {
   {  1, 4 },   /* FLD_SET_SPEED  位 1-4   */
   {  5, 8 },   /* FLD_SET_TIME   位 5-12  */
   { 13, 4 },   /* FLD_INST_SPEED 位 13-16 */
-  { 17, 4 },   /* FLD_INST_TEMP  位 17-20 */
-  { 21, 8 }    /* FLD_REM_TIME   位 21-28 */
+  { 25, 4 },   /* FLD_INST_TEMP  位 25-28（2026-09-16 实测修正） */
+  { 17, 8 }    /* FLD_REM_TIME   位 17-24（H4:M2:S2 连续，2026-09-16 实测修正） */
 };
+
+/* Remaining Time 的 m/s 段起始（整体与 Set Time 同构，见上表） */
+#define REM_M_FIRST  21U   /* m 十位/个位 = 位 21-22 */
+#define REM_S_FIRST  23U   /* s 十位/个位 = 位 23-24 */
 
 /* 业务图标角色（图标 → S 编号绑定见 iconBind） */
 typedef enum {
@@ -157,8 +161,8 @@ static void lcd_all(uint8_t on);
 static void set_role_icon(uint8_t role, uint8_t on);
 static void draw_blank_digits(uint8_t first, uint8_t len);
 static void draw_number_rl(uint8_t first, uint8_t len, uint32_t value);
+static void draw_number_pad(uint8_t first, uint8_t len, uint32_t value);
 static void draw_two_digits(uint8_t first, uint8_t v);
-static void draw_time_field(uint8_t first, uint16_t h, uint8_t m, uint8_t s);
 static void display_smooth_speed(void);
 static void display_render(void);
 
@@ -297,22 +301,24 @@ static void draw_number_rl(uint8_t first, uint8_t len, uint32_t value)
 }
 
 /**
+  * @brief  固定位数补零显示（0001 式；时间 H 字段用，符合 TC-DISP-03 口径）
+  */
+static void draw_number_pad(uint8_t first, uint8_t len, uint32_t value)
+{
+  for (uint8_t i = 0U; i < len; i++)
+  {
+    lcd_show_digit((uint8_t)(first + len - 1U - i), (uint8_t)(value % 10U));
+    value /= 10U;
+  }
+}
+
+/**
   * @brief  两位数字显示（补零，0-99）
   */
 static void draw_two_digits(uint8_t first, uint8_t v)
 {
   lcd_show_digit(first, (uint8_t)(v / 10U));
   lcd_show_digit((uint8_t)(first + 1U), (uint8_t)(v % 10U));
-}
-
-/**
-  * @brief  绘制时间字段（H4 右对齐消隐 + M2 补零 + S2 补零）
-  */
-static void draw_time_field(uint8_t first, uint16_t h, uint8_t m, uint8_t s)
-{
-  draw_number_rl(first, 4U, h);
-  draw_two_digits((uint8_t)(first + 4U), m);
-  draw_two_digits((uint8_t)(first + 6U), s);
 }
 
 /**
@@ -402,7 +408,7 @@ static void display_render(void)
   f = fieldLayout[FLD_SET_TIME].first;
   if (!((edit == EDIT_TIME_H) && (blinkPhase == 0U)))
   {
-    draw_number_rl(f, 4U, cfgH);
+    draw_number_pad(f, 4U, cfgH);   /* H 4 位补零（0001 式，TC-DISP-03） */
   }
   if (!((edit == EDIT_TIME_M) && (blinkPhase == 0U)))
   {
@@ -419,7 +425,20 @@ static void display_render(void)
   draw_number_rl(fieldLayout[FLD_INST_SPEED].first,
                  fieldLayout[FLD_INST_SPEED].len, dispSpeed);
 
-  /* ---- Instant Temp：探头在位才显示真实温度 ---- */
+  /* ---- Instant Temp ----
+     占位模式（TEMP_DISPLAY_PLACEHOLDER=1，探头硬件未到，2026-09-16 用户指令）：
+       固定显示 TEMP_PLACEHOLDER_T10（25.8℃）+ 点/℃/标签恒显；
+     真实模式（=0）：探头在位才显示真实测量值（拔出整块隐藏，REQ-DISP-06）。 */
+#if (TEMP_DISPLAY_PLACEHOLDER != 0U)
+  draw_number_rl(fieldLayout[FLD_INST_TEMP].first, 3U,
+                 (uint32_t)(TEMP_PLACEHOLDER_T10 / 10U));
+  lcd_show_digit((uint8_t)(fieldLayout[FLD_INST_TEMP].first + 3U),
+                 (uint8_t)(TEMP_PLACEHOLDER_T10 % 10U));
+  lcd_set_icon(DISP_TEMP_DP_SEG, 1U);
+  lcd_set_icon(DISP_TEMP_C_SEG, 1U);
+  lcd_set_icon(DISP_TEMP_LBL_A, 1U);
+  lcd_set_icon(DISP_TEMP_LBL_B, 1U);
+#else
   if (temp_sensor_is_valid() != 0U)
   {
     int16_t t10 = temp_sensor_get_deci_c();
@@ -447,9 +466,12 @@ static void display_render(void)
     lcd_set_icon(DISP_TEMP_LBL_A, 1U);
     lcd_set_icon(DISP_TEMP_LBL_B, 1U);
   }
+#endif
 
-  /* ---- Remaining Time ---- */
-  draw_time_field(fieldLayout[FLD_REM_TIME].first, remH, remM, remS);
+  /* ---- Remaining Time（位17-24：H17-20 + m21-22 + s23-24，2026-09-16 实测确认） ---- */
+  draw_number_pad(fieldLayout[FLD_REM_TIME].first, 4U, remH);
+  draw_two_digits(REM_M_FIRST, remM);
+  draw_two_digits(REM_S_FIRST, remS);
 
   /* 缓冲有变化才置脏（避免每 50ms 全量串行写屏阻塞主循环） */
   if (memcmp(lcdRam, lcdRamPrev, HT1623_RAM_NIBBLES) != 0)
