@@ -20,6 +20,8 @@ void display_request_refresh(void);
 void display_debug_all(uint8_t on);     /* 全亮/全灭（点亮测试） */
 void display_debug_digit(uint8_t n);    /* 第 n 位数码管显示 8（1..28） */
 void display_debug_icon(uint8_t s);     /* 点亮图标 S 编号（1..30） */
+void display_debug_sweep_start(void);   /* S1..S30 自动轮扫（1.5s/个，串口同步打编号；扫完回自动） */
+void display_debug_sweep_stop(void);    /* 提前结束轮扫（保持当前段亮） */
 void display_debug_auto(void);          /* 恢复业务自动刷新 */
 
 #endif /* DISPLAY_H */

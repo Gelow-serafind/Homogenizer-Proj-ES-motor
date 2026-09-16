@@ -2,7 +2,7 @@
 * @filename:  uart_cmd.c
 * @brief:     调试 shell 实现（原 UART 命令系统迁移；命令语义不变）
 * @note       命令表：help/h、speed、time、start、stop、pause、pwm、adc、tach、knob、
-*              status、lcd、pid、pidkp、pidki（速度环整定）
+*              status、lcd、pid、pidkp、pidki（速度环整定）、templog（温度原始值打印）
 *******************************************************************************/
 #include "main.h"
 #include <stdio.h>
@@ -13,6 +13,7 @@
 #include "display.h"
 #include "ec11.h"
 #include "motor.h"
+#include "temp_sensor.h"
 #include "timer.h"
 #include "uart_cmd.h"
 
@@ -50,6 +51,7 @@ static void cmd_lcd(const char* args);
 static void cmd_pid(const char* args);
 static void cmd_pidkp(const char* args);
 static void cmd_pidki(const char* args);
+static void cmd_templog(const char* args);
 
 /* 指令表：添加新指令只需在此增加 { "name", CallbackFn } 项 */
 static const CmdEntry_t cmdTable[] = {
@@ -69,6 +71,7 @@ static const CmdEntry_t cmdTable[] = {
   { "pid",    cmd_pid       },
   { "pidkp",  cmd_pidkp     },
   { "pidki",  cmd_pidki     },
+  { "templog", cmd_templog  },
   { NULL,     NULL          }
 };
 
@@ -471,6 +474,37 @@ static void cmd_pidki(const char* args)
 }
 
 /**
+  * @brief  templog [on|off]：温度原始值持续打印开关（无参数=切换；单次值用 adc 命令）
+  * @note   开启后每 500ms 一行 AIN0/AIN1 原始码 + 等效电压，供拔插/加热探头标定
+  */
+static void cmd_templog(const char* args)
+{
+  const char* p = args;
+
+  while (*p == ' ')
+  {
+    p++;
+  }
+
+  if (strncmp(p, "on", 2U) == 0)
+  {
+    temp_sensor_log_enable(1U);
+  }
+  else if (strncmp(p, "off", 3U) == 0)
+  {
+    temp_sensor_log_enable(0U);
+  }
+  else
+  {
+    /* 无参数：切换 */
+    temp_sensor_log_enable((temp_sensor_log_is_enabled() != 0U) ? 0U : 1U);
+  }
+
+  printf("\r\nTEMP log: %s (每 500ms 一行，AIN0/AIN1 原始码+等效电压；单次值用 adc)\r\n",
+         (temp_sensor_log_is_enabled() != 0U) ? "ON" : "OFF");
+}
+
+/**
   * @brief  adc：读 ADS1115 两通道原始值（信号/接线验证用）
   */
 static void cmd_adc(const char* args)
@@ -480,13 +514,13 @@ static void cmd_adc(const char* args)
 
   (void)args;
   a0 = ads1115_read(ADS_CH_TEMP);
-  a1 = ads1115_read(ADS_CH_SPEED);
-  printf("\r\nADS: AIN0(PT1000)=%u  AIN1(SPEED_SW)=%u  (0xFFFF=bus err)\r\n",
+  a1 = ads1115_read(ADS_CH_TEMP_REF);
+  printf("\r\nADS: AIN0(PT1000+)=%u  AIN1(基准)=%u  (0xFFFF=bus err)\r\n",
          (unsigned)a0, (unsigned)a1);
 }
 
 /**
-  * @brief  tach <n>：连续采样 AIN1（SPEED_SW）并统计电平跳变（手转电机数脉冲）
+  * @brief  tach <n>：连续采样 AIN1（历史调试：早期用于手转电机数脉冲，现 AIN1 为测温基准）
   */
 static void cmd_tach(const char* args)
 {
@@ -525,7 +559,7 @@ static void cmd_tach(const char* args)
 
   for (i = 0U; i < cnt; i++)
   {
-    v = ads1115_read(ADS_CH_SPEED);
+    v = ads1115_read(ADS_CH_TEMP_REF);
     if (v != 0xFFFFU)
     {
       if (v < vmin)
@@ -622,6 +656,13 @@ static void cmd_lcd(const char* args)
     return;
   }
 
+  /* sweep：S1..S30 自动轮扫（1.5s/个；用于图标/单位段/小数点语义校准） */
+  if (strncmp(args, "sweep", 5U) == 0)
+  {
+    display_debug_sweep_start();
+    return;
+  }
+
   if (strncmp(args, "all", 3U) == 0)
   {
     display_debug_all(1U);
@@ -680,7 +721,7 @@ static void cmd_lcd(const char* args)
     return;
   }
 
-  printf("\r\nLCD usage: lcd auto | lcd all | lcd off | lcd d1-28 | lcd s1-30\r\n");
+  printf("\r\nLCD usage: lcd auto | lcd sweep | lcd all | lcd off | lcd d1-28 | lcd s<n>\r\n");
 }
 
 /* ====================== printf 重定向 ====================== */

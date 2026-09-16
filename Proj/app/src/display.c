@@ -5,6 +5,7 @@
 *******************************************************************************/
 #include "main.h"
 #include <string.h>
+#include <stdio.h>
 #include "app_cfg.h"
 #include "ht1623.h"
 #include "event_bus.h"
@@ -99,7 +100,7 @@ static const struct {
   { 21, 8 }    /* FLD_REM_TIME   位 21-28 */
 };
 
-/* 业务图标 → S 编号绑定（0=未绑定不亮；用 "lcd s1-30" 实测后填入） */
+/* 业务图标角色（图标 → S 编号绑定见 iconBind） */
 typedef enum {
   ROLE_SENSOR = 0,   /* 十字架：PT1000 在位（A5） */
   ROLE_CLOCK,        /* 时钟：倒计时中 */
@@ -109,7 +110,32 @@ typedef enum {
   ROLE_COUNT
 } icon_role_t;
 
-static const uint8_t iconBind[ROLE_COUNT] = { 0U, 0U, 0U, 0U, 0U };
+/* 业务图标 → S 编号绑定（0=未绑定不亮；lcd sweep 实测 2026-09-16，30/30 全匹配：
+   十字架=S30、时钟=S1、圆（旋转圈）=S4、▲=S3；感叹号玻璃未做该段（需求"本版恒灭"） */
+static const uint8_t iconBind[ROLE_COUNT] = { 30U, 1U, 0U, 4U, 3U };
+
+/* 段位语义表（lcd sweep 实测 2026-09-16，30/30 全匹配，完整表见《显示屏阶段性问题排查结果》）
+   S1=时钟图标 S2=Set Speed字 S3=▲图标 S4=圆图标 S5=Rpm(上) S6=Set Time字 S7/8/9=H/m/s(上)
+   S10-S19=中间十条横线（隔断线，常显）
+   S20=Instant Speed字 S21=Rpm(下) S22=Remaining Time字 S23/24/25=H/m/s(下)
+   S26/S27=Instant Temp标签（拆两段，随探头在位）S28=温度小数点 S29=℃ S30=十字架 */
+
+/* 固定常显段（标签/单位/隔断线） */
+static const uint8_t dispAlwaysOn[] = {
+  2U, 5U, 6U, 7U, 8U, 9U,                       /* 上半：Set Speed / Rpm / Set Time / H m s */
+  10U, 11U, 12U, 13U, 14U, 15U, 16U, 17U, 18U, 19U,   /* 中间十条横线（隔断线） */
+  20U, 21U, 22U, 23U, 24U, 25U                  /* 下半：Instant Speed / Rpm / Remaining Time / H m s */
+};
+#define DISP_ALWAYS_ON_COUNT (sizeof(dispAlwaysOn) / sizeof(dispAlwaysOn[0]))
+
+/* 温度相关段（S 编号）：小数点 / ℃ / "Instant"和"Temp"标签（拆两段，随探头在位） */
+#define DISP_TEMP_DP_SEG   28U
+#define DISP_TEMP_C_SEG    29U
+#define DISP_TEMP_LBL_A    26U
+#define DISP_TEMP_LBL_B    27U
+
+/* S 段轮扫步长（ms；lcd sweep 自动逐个点亮用） */
+#define DISP_SWEEP_STEP_MS 1500U
 
 /* ====================== 模块状态 ====================== */
 
@@ -119,6 +145,9 @@ static uint8_t lcdDirty  = 0U;
 static uint8_t lcdManual = 0U;                   /* 1=lcd 调试命令手动模式 */
 static uint8_t blinkPhase = 0U;                  /* 编辑字段闪烁相位（EVT_BLINK_TOGGLE 同步） */
 static uint16_t dispSpeed = 0U;                  /* Instant Speed 显示平滑值（真实值低通版） */
+static uint8_t sweepActive = 0U;                 /* lcd sweep：S 段自动轮扫中 */
+static uint8_t sweepNum    = 0U;                 /* 当前扫描到的 S 编号 1..30 */
+static uint16_t sweepMs    = 0U;                 /* 轮扫计时 */
 
 /* static 前置原型 */
 static void lcd_set_segment(uint8_t seg, uint8_t com, uint8_t on);
@@ -356,6 +385,12 @@ static void display_render(void)
   set_role_icon((uint8_t)ROLE_WARN, 0U);
   set_role_icon((uint8_t)ROLE_SENSOR, temp_sensor_is_valid());
 
+  /* ---- 常显段：标签/单位/十条隔断线（lcd sweep 实测 2026-09-16） ---- */
+  for (uint8_t i = 0U; i < (uint8_t)DISP_ALWAYS_ON_COUNT; i++)
+  {
+    lcd_set_icon(dispAlwaysOn[i], 1U);
+  }
+
   /* ---- Set Speed：编辑中（EDIT_SPEED）且灭相 → 消隐 ---- */
   if (!((edit == EDIT_SPEED) && (blinkPhase == 0U)))
   {
@@ -384,11 +419,33 @@ static void display_render(void)
   draw_number_rl(fieldLayout[FLD_INST_SPEED].first,
                  fieldLayout[FLD_INST_SPEED].len, dispSpeed);
 
-  /* ---- Instant Temp：探头在位才显示（P4 前恒 0 → 熄灭）；有效时显占位 8888 ---- */
+  /* ---- Instant Temp：探头在位才显示真实温度 ---- */
   if (temp_sensor_is_valid() != 0U)
   {
+    int16_t t10 = temp_sensor_get_deci_c();
+
+    if (t10 < 0)
+    {
+      t10 = 0;
+    }
+#if (DISP_TEMP_DP_SEG != 0U)
+    /* 0.1℃ 全格式：xxx.x（小数位第 4 位）+ 小数点段 + ℃ 段 */
+    draw_number_rl(fieldLayout[FLD_INST_TEMP].first, 3U, (uint32_t)(t10 / 10));
+    lcd_show_digit((uint8_t)(fieldLayout[FLD_INST_TEMP].first + 3U),
+                   (uint8_t)(t10 % 10));
+    lcd_set_icon(DISP_TEMP_DP_SEG, 1U);
+#else
+    /* 段位未校准过渡：整数 ℃（4 位右对齐）；填上 DISP_TEMP_DP_SEG 后自动切 0.1℃ 格式 */
     draw_number_rl(fieldLayout[FLD_INST_TEMP].first,
-                   fieldLayout[FLD_INST_TEMP].len, 8888U);
+                   fieldLayout[FLD_INST_TEMP].len, (uint32_t)(t10 / 10));
+#endif
+    if (DISP_TEMP_C_SEG != 0U)
+    {
+      lcd_set_icon(DISP_TEMP_C_SEG, 1U);
+    }
+    /* "Instant"/"Temp" 标签随探头在位（REQ-DISP-06：整块连标签隐藏） */
+    lcd_set_icon(DISP_TEMP_LBL_A, 1U);
+    lcd_set_icon(DISP_TEMP_LBL_B, 1U);
   }
 
   /* ---- Remaining Time ---- */
@@ -428,6 +485,28 @@ void display_ops(void)
 {
   if (lcdManual != 0U)
   {
+    /* lcd sweep：S 段自动轮扫推进（1.5s/个，串口同步打编号） */
+    if (sweepActive != 0U)
+    {
+      sweepMs += TASK_PERIOD_DISPLAY_MS;
+      if (sweepMs >= DISP_SWEEP_STEP_MS)
+      {
+        sweepMs = 0U;
+        if (sweepNum >= 30U)
+        {
+          sweepActive = 0U;
+          display_debug_auto();
+          printf("\r\nSWEEP: done, auto restored\r\n");
+        }
+        else
+        {
+          sweepNum++;
+          display_debug_icon(sweepNum);
+          printf("SWEEP: S%u\r\n", (unsigned)sweepNum);
+        }
+      }
+    }
+
     /* 手动调试模式：暂停业务渲染，仅按脏标记送屏 */
     if (lcdDirty != 0U)
     {
@@ -470,8 +549,23 @@ void display_debug_icon(uint8_t s)
   lcd_set_icon(s, 1U);
 }
 
+void display_debug_sweep_start(void)
+{
+  sweepActive = 1U;
+  sweepNum    = 1U;
+  sweepMs     = 0U;
+  display_debug_icon(1U);
+  printf("\r\nSWEEP: S1 (每 1.5s 下一个；看屏上出现的符号，串口同步打编号)\r\n");
+}
+
+void display_debug_sweep_stop(void)
+{
+  sweepActive = 0U;
+}
+
 void display_debug_auto(void)
 {
+  sweepActive = 0U;
   lcdManual = 0U;
   display_request_refresh();
 }

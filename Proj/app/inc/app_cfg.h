@@ -54,7 +54,6 @@
 
 /* ============ 功能开关（标定/验证阶段） ============ */
 #define BOOT_TACH_LOOP          0U      /* 1=上电进入 AIN 通道测速调试循环（不启动 shell） */
-#define TEMP_VALID_DETECT_EN    0U      /* 1=启用骨架版探头在位判定（P4 标定后启用） */
 #define EC11_USE_EXTI           1U      /* 1=旋钮 PC5/PC3 双边沿 EXTI 捕获（推荐）；0=2ms 轮询回退 */
 
 /* ============ 引脚定义（新板 V1.0；禁止散落魔法值） ============ */
@@ -85,11 +84,14 @@
 #define HT1623_SEG_COUNT    29U
 #define HT1623_RAM_NIBBLES  (HT1623_SEG_COUNT * 2U)   /* 58 个 nibble */
 
-/* ============ ADS1115（I2C 0x48；AIN0/AIN1=PT1000（图纸核实 2026-09-14），温度换算待实现） ============ */
+/* ============ ADS1115（I2C 0x48；PT1000 比率法双通道，原理图核实 2026-09-15） ============ */
 #define ADS1115_ADDR_W  0x90U      /* 0x48<<1 写 */
 #define ADS1115_ADDR_R  0x91U      /* 0x48<<1|1 读 */
-#define ADS_CH_TEMP     0U         /* AIN0 = PT1000 温度（名义，待实测） */
-#define ADS_CH_SPEED    1U         /* AIN1（历史诊断，shell tach）；测速实际走 PB4，见下 */
+#define ADS_CH_TEMP     0U         /* AIN0 = ADC_PT1000+ 节点（R16 1k 上拉 + 探头对地） */
+#define ADS_CH_TEMP_REF 1U         /* AIN1 = R19/R18(1k:1k) 基准中点（比率法参考，免疫电源波动） */
+
+/* ============ PT1000 测温（比率法 + 查表，2026-09-15 实装） ============ */
+#define TEMP_DEN_MIN     4000U     /* 2×AIN1−AIN0 < 此值 → 探头拔出/断路（悬空≈0；插 25℃≈12106） */
 
 /* ============ 测速 SPEED_SW（U15 速度检测 3P 座；与 USART1_RX 同网络 → PB4，图纸核实 2026-09-14） ============ */
 #define SPEED_PPR              18U      /* A10 实测：18 计数/圈（2026-09-15 标定：1圈18、2圈36、7圈126） */
