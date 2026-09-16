@@ -6,7 +6,8 @@
 *              3. MOTOR_DUTY_CLAMP=1 强制 0%（防护）；当前=0 且 LUT 为验证映射（2026-09-15）
 *              4. 速度环（2026-09-15）：FF(LUT 前馈) + PI 反馈，20ms 节拍，Q8 定点；
 *                 反馈经订阅 EVT_SPEED_UPDATED 缓存（motor_on_event），无模块间直调；
-*                 参考轨迹=原斜坡 outRpm（启动无阶跃、A9 衰减显示）；
+*                 参考轨迹=原斜坡 outRpm（启动无阶跃；STOP 后重启动时按实测转速复位，
+*                 2026-09-17 修复大电流冲击）；
 *                 输出限幅 SPEED_LOOP_DUTY_MAX（兼堵转保护）；SPEED_LOOP_EN=0 回退开环
 *******************************************************************************/
 #include "main.h"
@@ -348,6 +349,15 @@ void motor_ops(void)
 
 void motor_set_target(uint16_t rpm)
 {
+  /* 2026-09-17 修复（上板 bug：STOP 后立即再 START 大电流猛启动）：
+     从停机状态（enabled=0）重新起飞时，参考轨迹改为从实测转速起飞（无阶跃）——
+     原实现沿用残留 outRpm（STOP 后由斜坡向 0 衰减，2s 内仍在高位），
+     电机已停而参考高位 → FF(LUT)+PI 误差巨大 → 启动冲击。 */
+  if (enabled == 0U)
+  {
+    outRpm = measRpm;
+  }
+
   targetRpm = rpm;
   enabled = 1U;
   pidDiv  = 0U;
@@ -359,7 +369,7 @@ void motor_set_target(uint16_t rpm)
 
 void motor_stop(void)
 {
-  enabled = 0U;   /* 参考轨迹由斜坡自然衰减（A9 显示）；输出由 ops 立即归零 */
+  enabled = 0U;   /* 输出由 ops 立即归零；参考轨迹自然衰减（下次 set_target 按实测复位） */
   iAcc    = 0L;
 }
 

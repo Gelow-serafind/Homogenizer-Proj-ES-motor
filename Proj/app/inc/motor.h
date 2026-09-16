@@ -30,7 +30,7 @@ void     motor_on_event(evt_type_t type, uint16_t val);   /* 订阅回调：只�
 void     motor_set_target(uint16_t rpm);        /* 白名单接口（仅 app_state 调用；不清积分，A14 步进平滑防抖动） */
 void     motor_stop(void);                      /* 受控停转：输出归零、参考轨迹斜坡衰减到 0（A9 显示） */
 void     motor_halt(void);                      /* 立即停转并清零参考轨迹（倒计时归零路径） */
-uint16_t motor_get_out_rpm(void);               /* 参考轨迹转速（显示/衰减显示用） */
+uint16_t motor_get_out_rpm(void);               /* 参考轨迹转速（shell 诊断） */
 uint16_t motor_get_duty_permille(void);         /* 当前应用占空比（千分比） */
 uint16_t motor_get_meas_rpm(void);              /* 实测转速缓存（诊断） */
 
