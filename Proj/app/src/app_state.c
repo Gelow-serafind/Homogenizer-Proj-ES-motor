@@ -3,8 +3,10 @@
 * @brief:     主状态机实现（原 Task_App/AppStart/AppStop/ApplyKnobDelta 迁移，行为等价）
 * @note        1. 事件回调只置标志，动作在 app_state_ops 消费（回调只读纪律）；
 *              2. 白名单直调：motor_set_target/motor_stop/timer_* /storage_request_save；
-*              3. 到达判定（A12，2026-09-15）：实测转速 |实际−目标| ≤ REACH_TOLERANCE_RPM
-*                 持续 REACH_HOLD_MS（数据源 = speed_sensor，速度环接入后开环模型不再代表真实转速）
+*              3. 到达判定（2026-09-15 实装）：实测转速 |实际−目标| ≤ REACH_TOLERANCE_RPM
+*                 持续 REACH_HOLD_MS → post(EVT_REACH_TARGET)（数据源 = speed_sensor）。
+*                 2026-09-17 起该事件仅作信息用途（无消费方）：倒计时改为 START 立即开始
+*                 （app_do_start 内 timer_resume），不再等待到达（用户实测决策）。
 *******************************************************************************/
 #include "main.h"
 #include "app_cfg.h"
@@ -65,6 +67,19 @@ static void app_commit(void)
 
   (void)storage_request_save(&p);      /* 入队，storage_ops 10ms 内分步落盘 */
   (void)evt_bus_post(EVT_PARAM_CONFIRMED, cfgRpm);
+
+  /* 运行中改过时间 → 倒计时按新值重载并从新值立即继续递减（REQ-TIMER-03，2026-09-17）；
+     时间为 0:00:00 时仅装载不递减（无计时作业）。timeEdited 用掉即清，避免后续
+     确认（如改速度的 5s 超时）误触发重复重载 */
+  if ((appMode == APP_RUNNING) && (timeEdited != 0U))
+  {
+    timer_load(cfgH, cfgM, cfgS);
+    if (((uint16_t)(cfgH | cfgM | cfgS)) != 0U)
+    {
+      timer_resume();
+    }
+    timeEdited = 0U;
+  }
 }
 
 /**
@@ -113,8 +128,16 @@ static void app_do_start(void)
     timer_load(cfgH, cfgM, cfgS);
   }
   /* 否则：PAUSED 未改时间 → 保留冻结的倒计时继续（timer 侧不动） */
+  timeEdited = 0U;               /* 编辑会话已消费（防运行中确认误触发重载） */
 
-  reached = 0U;                  /* 到达目标转速后再开始递减（A12） */
+  /* 2026-09-17 用户决策：按 START 立即开始/继续递减（取代"到达目标后才倒数"的
+     A12 旧语义）；时间为 0:00:00 时不倒数（无计时作业，也不触发归零） */
+  if (((uint16_t)(cfgH | cfgM | cfgS)) != 0U)
+  {
+    timer_resume();
+  }
+
+  reached = 0U;                  /* 到达判定保留：仅发布 EVT_REACH_TARGET（当前无消费方） */
   reachHoldMs = 0U;
   appMode = APP_RUNNING;
   motor_set_target(cfgRpm);      /* 白名单直调 */
@@ -135,9 +158,9 @@ static void app_do_stop(void)
   if (appMode == APP_RUNNING)
   {
     appMode = APP_PAUSED;
-    reached = 0U;                /* 冻结：timer 保留剩余值，恢复后重新到达再继续 */
+    reached = 0U;                /* 到达判定复位（信息事件用） */
     reachHoldMs = 0U;
-    timer_pause();
+    timer_pause();               /* 倒计时冻结保持（START 后从冻结值继续/立即倒数） */
     motor_stop();
     (void)evt_bus_post(EVT_MODE_CHANGED, (uint16_t)appMode);
   }
@@ -374,8 +397,9 @@ void app_state_ops(void)
     }
   }
 
-  /* ---- 到达判定（A12 完整实现，2026-09-15）：实测转速 |实际−目标| ≤ 容差且持续 ≥ 保持时间
-          → 通知 timer 开始递减；数据源 = speed_sensor（白名单 get，闭环后真实转速） ---- */
+  /* ---- 到达判定（2026-09-15 实装；2026-09-17 起仅发布信息事件，不再驱动倒计时——
+         倒计时已由 app_do_start 的 timer_resume 直启）：实测转速 |实际−目标| ≤ 容差且
+         持续 ≥ 保持时间 → post(EVT_REACH_TARGET)；数据源 = speed_sensor（白名单 get） ---- */
   if ((appMode == APP_RUNNING) && (reached == 0U))
   {
     if ((cfgRpm > 0U) && (((uint16_t)(cfgH | cfgM | cfgS)) != 0U))

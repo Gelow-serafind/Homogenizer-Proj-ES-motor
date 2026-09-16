@@ -107,7 +107,7 @@ static const struct {
 /* 业务图标角色（图标 → S 编号绑定见 iconBind） */
 typedef enum {
   ROLE_SENSOR = 0,   /* 十字架：PT1000 在位（A5） */
-  ROLE_CLOCK,        /* 时钟：倒计时中 */
+  ROLE_CLOCK,        /* 时钟：计时作业中（RUNNING 即亮；2026-09-16 实测修正） */
   ROLE_WARN,         /* 感叹号：本版恒灭（A8） */
   ROLE_MOTOR,        /* 圆：转速 > 0 */
   ROLE_ARROW,        /* ▲：RUNNING 常亮（A7） */
@@ -386,7 +386,10 @@ static void display_render(void)
   /* ---- 图标 ---- */
   /* 圆图标 = 显示平滑转速 > 0（闭环后数据源切 speed_sensor，真实转动状态；2026-09-15） */
   set_role_icon((uint8_t)ROLE_MOTOR, (dispSpeed > 0U) ? 1U : 0U);
-  set_role_icon((uint8_t)ROLE_CLOCK, timer_is_active());
+  /* 时钟图标 = 计时作业中：按 START 即亮（含加速段），暂停/待机/停止灭。
+     2026-09-16 实测修正：原"到达目标后才亮"→"启动即亮"，匹配需求简述 3 节
+     "电机转动后：圆图标点亮、时钟图标点亮"；倒数自 2026-09-17 起亦为 START 即开始。 */
+  set_role_icon((uint8_t)ROLE_CLOCK, (mode == APP_RUNNING) ? 1U : 0U);
   set_role_icon((uint8_t)ROLE_ARROW, (mode == APP_RUNNING) ? 1U : 0U);
   set_role_icon((uint8_t)ROLE_WARN, 0U);
   set_role_icon((uint8_t)ROLE_SENSOR, temp_sensor_is_valid());

@@ -13,7 +13,7 @@
 
 typedef enum {
   APP_STANDBY = 0,   /* 待机：显示上次参数，可直接启动 */
-  APP_RUNNING,       /* 运行：转速斜坡 → 到达目标后倒计时 */
+  APP_RUNNING,       /* 运行：转速斜坡→目标；倒计时 START 即开始（2026-09-17） */
   APP_PAUSED         /* 暂停：电机停、倒计时冻结、可恢复 */
 } app_mode_t;
 
