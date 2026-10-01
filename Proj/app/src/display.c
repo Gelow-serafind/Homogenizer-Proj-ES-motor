@@ -149,6 +149,8 @@ static uint8_t lcdDirty  = 0U;
 static uint8_t lcdManual = 0U;                   /* 1=lcd 调试命令手动模式 */
 static uint8_t blinkPhase = 0U;                  /* 编辑字段闪烁相位（EVT_BLINK_TOGGLE 同步） */
 static uint16_t dispSpeed = 0U;                  /* Instant Speed 显示平滑值（真实值低通版） */
+static uint8_t  dispReached = 0U;                /* Reach 吸附态：1=显示目标值；0=实时显示（2026-10-01，偏离回退后重新追踪） */
+static uint8_t  dispReachCnt = 0U;               /* 吸附/回退去抖计数（50ms 拍；防单拍毛刺误锁/误退） */
 static uint8_t sweepActive = 0U;                 /* lcd sweep：S 段自动轮扫中 */
 static uint8_t sweepNum    = 0U;                 /* 当前扫描到的 S 编号 1..30 */
 static uint16_t sweepMs    = 0U;                 /* 轮扫计时 */
@@ -164,6 +166,7 @@ static void draw_number_rl(uint8_t first, uint8_t len, uint32_t value);
 static void draw_number_pad(uint8_t first, uint8_t len, uint32_t value);
 static void draw_two_digits(uint8_t first, uint8_t v);
 static void display_smooth_speed(void);
+static void display_reach_update(app_mode_t mode, uint16_t cfgRpm);
 static void display_render(void);
 
 /* ====================== 底层段位操作 ====================== */
@@ -352,6 +355,67 @@ static void display_smooth_speed(void)
   }
 }
 
+/**
+  * @brief  Instant Speed Reach 吸附 / 偏离回退状态推进（50ms 一拍，2026-10-01 用户调试决策）
+  * @note   判定用 speed_sensor 原始实测值（与控制链/A12 同源，不能用 dispSpeed——
+  *         平滑值有 ±DIV 截断死区，可能永远到不了 ±2）；显示值仍走 dispSpeed 平滑。
+  *         非 RUNNING 不吸附（停止后回实时显示随惯性衰减）；
+  *         RUNNING 实测连续 DISP_REACH_HOLD_PATS 拍进入 ±DISP_REACH_RPM → 吸附
+  *         （显示锁定目标值；dispSpeed 同步对齐目标值，防回退跳变）；
+  *         吸附态中连续 DISP_DEVIATE_HOLD_PATS 拍偏离超过 ±DISP_DEVIATE_RPM 才回退
+  *         实时显示（dispSpeed 同步对齐实测值，回退即实时、无平滑滞后）；
+  *         回到 ±2 内持续 N 拍重新吸附。去抖防单拍毛刺（测速量化/EMA 阶梯）误锁误退。
+  */
+static void display_reach_update(app_mode_t mode, uint16_t cfgRpm)
+{
+  uint16_t raw = speed_sensor_get_rpm();
+  int32_t  d   = (int32_t)raw - (int32_t)cfgRpm;
+
+  if (mode != APP_RUNNING)
+  {
+    dispReached  = 0U;   /* 待机/暂停：恒实时显示 */
+    dispReachCnt = 0U;
+    return;
+  }
+
+  if (dispReached == 0U)
+  {
+    /* Reach：实测连续 N 拍在 ±DISP_REACH_RPM 内 → 吸附（显示锁定目标值） */
+    if ((d >= -(int32_t)DISP_REACH_RPM) && (d <= (int32_t)DISP_REACH_RPM))
+    {
+      dispReachCnt++;
+      if (dispReachCnt >= DISP_REACH_HOLD_PATS)
+      {
+        dispReached  = 1U;
+        dispReachCnt = 0U;
+        dispSpeed    = cfgRpm;   /* 切换对齐：锁定显示目标值（防回退瞬间跳变） */
+      }
+    }
+    else
+    {
+      dispReachCnt = 0U;
+    }
+  }
+  else
+  {
+    /* 偏离：仅当连续 N 拍超过 ±DISP_DEVIATE_RPM 才退出吸附 → 回退实时显示 */
+    if ((d < -(int32_t)DISP_DEVIATE_RPM) || (d > (int32_t)DISP_DEVIATE_RPM))
+    {
+      dispReachCnt++;
+      if (dispReachCnt >= DISP_DEVIATE_HOLD_PATS)
+      {
+        dispReached  = 0U;
+        dispReachCnt = 0U;
+        dispSpeed    = raw;      /* 切换对齐：回退立即显示实测值（不再走平滑滞后） */
+      }
+    }
+    else
+    {
+      dispReachCnt = 0U;
+    }
+  }
+}
+
 /* ====================== 业务渲染 ====================== */
 
 /**
@@ -380,8 +444,10 @@ static void display_render(void)
   app_state_get_cfg_time(&cfgH, &cfgM, &cfgS);
   timer_get_rem(&remH, &remM, &remS);
 
-  /* Instant Speed 平滑更新放最前：图标与字段同用当拍值（无帧滞后） */
+  /* Instant Speed 平滑更新放最前：图标与字段同用当拍值（无帧滞后）；
+     reach/偏离状态同拍推进（2026-10-01：进入 ±2 吸附目标值 / 偏离 >±15 回退实时） */
   display_smooth_speed();
+  display_reach_update(mode, cfgRpm);
 
   /* ---- 图标 ---- */
   /* 圆图标 = 显示平滑转速 > 0（闭环后数据源切 speed_sensor，真实转动状态；2026-09-15） */
@@ -422,16 +488,20 @@ static void display_render(void)
     draw_two_digits((uint8_t)(f + 6U), cfgS);
   }
 
-  /* ---- Instant Speed：实测转速 + 显示层二次平滑（真实值低通版，稳态不跳字） ----
-        变速跟随：|原始−显示| > DISP_SPEED_JUMP_RPM 快速跟随（/2）；否则每拍 1/8 强平滑；
-        停转（原始=0）立即归零。控制链（PID/A12）仍用 speed_sensor 原始值，不受影响。 */
+  /* ---- Instant Speed：reach 吸附 / 偏离回退（2026-10-01 用户调试决策，常量见 app_cfg.h） ----
+        非 RUNNING：实时显示（dispSpeed 平滑实测值，停止后随惯性衰减至 0）；
+        RUNNING：实测连续 N 拍进入目标 ±DISP_REACH_RPM → 吸附（显示锁定目标值）；
+        吸附态中连续 N 拍偏离超过 ±DISP_DEVIATE_RPM → 回退（dispSpeed 已对齐实测值，即实时）；
+        回到 ±2 内持续 N 拍重新吸附。去抖防单拍毛刺误锁误退。
+        平滑规则沿用 display_smooth_speed；控制链（PID/A12）仍用 speed_sensor 原始值，不受影响。 */
   draw_number_rl(fieldLayout[FLD_INST_SPEED].first,
-                 fieldLayout[FLD_INST_SPEED].len, dispSpeed);
+                 fieldLayout[FLD_INST_SPEED].len,
+                 (dispReached != 0U) ? cfgRpm : dispSpeed);
 
   /* ---- Instant Temp ----
-     占位模式（TEMP_DISPLAY_PLACEHOLDER=1，探头硬件未到，2026-09-16 用户指令）：
-       固定显示 TEMP_PLACEHOLDER_T10（25.8℃）+ 点/℃/标签恒显；
-     真实模式（=0）：探头在位才显示真实测量值（拔出整块隐藏，REQ-DISP-06）。 */
+     真实模式（TEMP_DISPLAY_PLACEHOLDER=0，2026-10-01 探头接入起为默认）：
+       探头在位才显示真实测量值（拔出整块隐藏，REQ-DISP-06）；
+     占位模式（=1）：固定显示 TEMP_PLACEHOLDER_T10（25.8℃）+ 点/℃/标签恒显（调试/演示备份）。 */
 #if (TEMP_DISPLAY_PLACEHOLDER != 0U)
   draw_number_rl(fieldLayout[FLD_INST_TEMP].first, 3U,
                  (uint32_t)(TEMP_PLACEHOLDER_T10 / 10U));

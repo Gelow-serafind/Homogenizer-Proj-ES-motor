@@ -52,11 +52,17 @@
 #define DISP_SPEED_JUMP_RPM     30U      /* |原始−显示| > 该值 → 快速跟随（每拍 /2，调速不迟钝） */
 #define DISP_SPEED_SS_DIV        8U      /* 稳态平滑：每拍仅跟随 1/8 偏差（50ms 拍，τ≈0.4s；防跳字） */
 
+/* ============ 屏显 Reach 吸附 / 偏离回退（2026-10-01 用户调试决策；判定用 speed_sensor 原始值） ============ */
+#define DISP_REACH_RPM            5U     /* RUNNING 下实测连续 N 拍进入目标 ±2 RPM → 吸附：显示锁定目标值（reach） */
+#define DISP_DEVIATE_RPM         15U     /* 吸附态中连续 N 拍偏离超过 ±15 RPM 才回退实时显示（偏离）；回到 ±2 内重新吸附 */
+#define DISP_REACH_HOLD_PATS      4U     /* 吸附判定去抖：连续 N 拍（50ms/拍）在 ±2 内才锁定显示（防毛刺误锁） */
+#define DISP_DEVIATE_HOLD_PATS    4U     /* 回退判定去抖：连续 N 拍（50ms/拍）超 ±15 才回退实时显示（防毛刺误退） */
+
 /* ============ 功能开关（标定/验证阶段） ============ */
 #define BOOT_TACH_LOOP          0U      /* 1=上电进入 AIN 通道测速调试循环（不启动 shell） */
 #define EC11_USE_EXTI           1U      /* 1=旋钮 PC5/PC3 双边沿 EXTI 捕获（推荐）；0=2ms 轮询回退 */
-#define TEMP_DISPLAY_PLACEHOLDER 1U     /* 1=温度显示固定占位值（探头硬件未到，2026-09-16 用户指令）；
-                                           0=显示真实测量值（探头到位后切 0，自动恢复拔出隐藏 REQ-DISP-06） */
+#define TEMP_DISPLAY_PLACEHOLDER 0U     /* 0=显示真实测量值（探头已接入 2026-10-01；拔出整块隐藏 REQ-DISP-06）；
+                                           1=回退固定占位值（段位调试/探头未到时的演示备份） */
 #define TEMP_PLACEHOLDER_T10    258U    /* 占位值：25.8℃（仅 TEMP_DISPLAY_PLACEHOLDER=1 时生效） */
 
 /* ============ 引脚定义（新板 V1.0；禁止散落魔法值） ============ */
