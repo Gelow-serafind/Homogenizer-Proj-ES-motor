@@ -53,9 +53,9 @@
 #define DISP_SPEED_SS_DIV        8U      /* 稳态平滑：每拍仅跟随 1/8 偏差（50ms 拍，τ≈0.4s；防跳字） */
 
 /* ============ 屏显 Reach 吸附 / 偏离回退（2026-10-01 用户调试决策；判定用 speed_sensor 原始值） ============ */
-#define DISP_REACH_RPM            5U     /* RUNNING 下实测连续 N 拍进入目标 ±2 RPM → 吸附：显示锁定目标值（reach） */
-#define DISP_DEVIATE_RPM         15U     /* 吸附态中连续 N 拍偏离超过 ±15 RPM 才回退实时显示（偏离）；回到 ±2 内重新吸附 */
-#define DISP_REACH_HOLD_PATS      4U     /* 吸附判定去抖：连续 N 拍（50ms/拍）在 ±2 内才锁定显示（防毛刺误锁） */
+#define DISP_REACH_RPM            5U     /* RUNNING 下实测连续 N 拍进入目标 ±5 RPM → 吸附：显示锁定目标值（reach） */
+#define DISP_DEVIATE_RPM         15U     /* 吸附态中连续 N 拍偏离超过 ±15 RPM 才回退实时显示（偏离）；回到 ±5 内重新吸附 */
+#define DISP_REACH_HOLD_PATS      4U     /* 吸附判定去抖：连续 N 拍（50ms/拍）在 ±5 内才锁定显示（防毛刺误锁） */
 #define DISP_DEVIATE_HOLD_PATS    4U     /* 回退判定去抖：连续 N 拍（50ms/拍）超 ±15 才回退实时显示（防毛刺误退） */
 
 /* ============ 功能开关（标定/验证阶段） ============ */

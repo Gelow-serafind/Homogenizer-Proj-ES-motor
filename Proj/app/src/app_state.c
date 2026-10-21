@@ -16,6 +16,8 @@
 #include "speed_sensor.h"
 #include "timer.h"
 #include "app_state.h"
+#include "display.h"
+#include "temp_sensor.h"
 
 static app_mode_t   appMode = APP_STANDBY;
 static edit_field_t appEdit = EDIT_NONE;
@@ -93,7 +95,7 @@ static void app_enter_edit(void)
   }
   appEdit    = EDIT_SPEED;
   idleMs     = 0U;
-  timeEdited = 0U;
+  /* 暂停中已确认的新时间仍待 START 重载，不能在再次进入设置时丢弃。 */
 }
 
 /**
@@ -253,7 +255,7 @@ void app_state_init(void)
   evCcw      = 0U;
   evZero     = 0U;
 
-  /* 从 Flash 恢复上次设置（无记录 → 默认 0，A13） */
+  /* 从 Flash 恢复上次设置（无记录 → 默认 RPM_MIN，A13） */
   storage_get_params(&p);
   cfgRpm = p.rpm;
   cfgH   = p.h;
@@ -352,6 +354,7 @@ void app_state_ops(void)
   {
     if (press != 0U)   /* 单击：SPEED → TIME_H → TIME_M → TIME_S → SPEED 循环 */
     {
+      app_commit();   /* 单击确认当前字段后再跳转（A15） */
       appEdit = (edit_field_t)(((uint8_t)appEdit % 4U) + 1U);
       idleMs  = 0U;
     }
@@ -421,6 +424,22 @@ void app_state_ops(void)
         reachHoldMs = 0U;
       }
     }
+  }
+  /* 唯一编排点：白名单读取业务状态后推送一致的显示快照。 */
+  {
+    display_view_t view;
+    view.mode = appMode;
+    view.edit = appEdit;
+    view.cfg_rpm = cfgRpm;
+    view.cfg_h = cfgH;
+    view.cfg_m = cfgM;
+    view.cfg_s = cfgS;
+    timer_get_rem(&view.rem_h, &view.rem_m, &view.rem_s);
+    view.timer_active = timer_is_active();
+    view.raw_rpm = speed_sensor_get_rpm();
+    view.temp_valid = temp_sensor_is_valid();
+    view.temp_deci_c = temp_sensor_get_deci_c();
+    display_set_view(&view);
   }
 }
 

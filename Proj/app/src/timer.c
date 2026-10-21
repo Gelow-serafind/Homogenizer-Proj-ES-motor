@@ -67,7 +67,7 @@ void timer_ops(void)
         remM = 59U;
         remS = 59U;
       }
-      else
+      if ((remH == 0U) && (remM == 0U) && (remS == 0U))
       {
         /* 归零：停表并发布事件（app_state → STANDBY、motor_halt） */
         active = 0U;

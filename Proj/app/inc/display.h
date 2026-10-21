@@ -1,15 +1,26 @@
 /*******************************************************************************
 * @filename:  display.h
 * @brief:     显示模块：字段渲染（4 数据区+图标区）、闪烁相位、差分写屏（架构第 8 节）
-* @note       渲染采用"周期拉取式"：display_ops 每 50ms 经各模块 getter 重建 RAM 镜像，
-*              与上一帧 memcmp 有差异才经 ht1623 整片写屏；
-*              字段布局/图标编号为推断初值，实测校准只改本文件两张表（R6）
+* @note       app_state 经白名单推送完整快照；50ms 重建 RAM，有差异才写屏。
 *******************************************************************************/
 #ifndef DISPLAY_H
 #define DISPLAY_H
 
 #include <stdint.h>
 #include "event_bus.h"
+#include "app_state.h"
+
+typedef struct {
+  app_mode_t mode;
+  edit_field_t edit;
+  uint16_t cfg_rpm, cfg_h, rem_h, raw_rpm;
+  int16_t temp_deci_c;
+  uint8_t cfg_m, cfg_s, rem_m, rem_s;
+  uint8_t temp_valid, timer_active;
+} display_view_t;
+
+/* app_state 白名单推送；仅复制，不写屏 */
+void display_set_view(const display_view_t *view);
 
 void display_init(void);      /* ht1623 初始化 + 开机全显（清屏） */
 void display_ops(void);       /* 50ms：渲染 + 差分写屏（手动调试模式仅送屏） */

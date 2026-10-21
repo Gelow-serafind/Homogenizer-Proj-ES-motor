@@ -29,7 +29,7 @@ void app_state_init(void);
 void app_state_ops(void);                       /* 10ms：事件消费、状态迁移、5s 计时、到达判定 */
 void app_state_on_event(evt_type_t type, uint16_t val);
 
-/* 权威参数 getter（display/timer/storage 只读） */
+/* 权威参数 getter（shell 诊断；display 由 app_state 推送快照） */
 app_mode_t   app_state_get_mode(void);
 edit_field_t app_state_get_edit(void);
 uint16_t     app_state_get_cfg_rpm(void);

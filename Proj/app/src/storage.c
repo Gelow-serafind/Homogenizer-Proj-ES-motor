@@ -10,6 +10,7 @@
 #include "storage.h"
 
 static user_param_t storageCurrent;              /* 当前已加载/已保存参数 */
+static user_param_t storageWriting;              /* 当前两 word 共用的固定快照 */
 static user_param_t storagePending;              /* 待写入参数 */
 
 /* 分步写状态机：0=空闲 1=写 w0 2=写 w1 */
@@ -37,6 +38,8 @@ void storage_init(void)
 
   memset(&storageCurrent, 0, sizeof(storageCurrent));
   memset(&storagePending, 0, sizeof(storagePending));
+  memset(&storageWriting, 0, sizeof(storageWriting));
+  storageCurrent.rpm = RPM_MIN;
   storageSaveState = 0U;
   storageNeedAgain = 0U;
 
@@ -49,7 +52,7 @@ void storage_init(void)
 
     if ((rpm <= RPM_MAX) && (h <= TIME_HOUR_MAX) && (m < 60U) && (s < 60U))
     {
-      storageCurrent.rpm = rpm;
+      storageCurrent.rpm = (rpm < RPM_MIN) ? RPM_MIN : rpm;
       storageCurrent.h   = h;
       storageCurrent.m   = m;
       storageCurrent.s   = s;
@@ -67,6 +70,11 @@ uint8_t storage_request_save(const user_param_t *p)
     return 0U;
   }
 
+  if ((storageSaveState == 0U) && (p->rpm == storageCurrent.rpm) &&
+      (p->h == storageCurrent.h) && (p->m == storageCurrent.m) && (p->s == storageCurrent.s))
+  {
+    return 1U;   /* 无变化的单击确认不消耗 Flash 槽 */
+  }
   storagePending = *p;
   if (storageSaveState == 0U)
   {
@@ -87,19 +95,21 @@ void storage_ops(void)
   switch (storageSaveState)
   {
     case 1U:
+      storageWriting = storagePending;
+      storageNeedAgain = 0U;
       storageSaveSlot = flash_wear_find_empty_slot();
       if (storageSaveSlot == 0xFFU)
       {
         flash_wear_erase_page();          /* 写满 16 槽：擦页重来（单次 <50ms 停顿） */
         storageSaveSlot = 0U;
       }
-      flash_wear_write_word(storageSaveSlot, 0U, storage_pack_w0(&storagePending));
+      flash_wear_write_word(storageSaveSlot, 0U, storage_pack_w0(&storageWriting));
       storageSaveState = 2U;
       break;
 
     case 2U:
-      flash_wear_write_word(storageSaveSlot, 1U, storage_pack_w1(&storagePending));
-      storageCurrent = storagePending;
+      flash_wear_write_word(storageSaveSlot, 1U, storage_pack_w1(&storageWriting));
+      storageCurrent = storageWriting;
       storageSaveState = 0U;
       if (storageNeedAgain != 0U)
       {

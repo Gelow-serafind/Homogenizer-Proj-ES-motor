@@ -10,9 +10,6 @@
 #include "ht1623.h"
 #include "event_bus.h"
 #include "app_state.h"
-#include "speed_sensor.h"
-#include "temp_sensor.h"
-#include "timer.h"
 #include "display.h"
 
 /* ====================== 段位映射表（实测校准只改此两张表，R6） ====================== */
@@ -56,7 +53,7 @@ static const lcd_seg_t lcdDigitMap[28][7] = {
   /* 28 */ { LSEG(26,4), LSEG(27,4), LSEG(27,2), LSEG(26,1), LSEG(26,2), LSEG(26,3), LSEG(27,3) },
 };
 
-/* 图标段位表：S1..S30（十字架/时钟/感叹号/圆/向上/Rpm/°C/H/m/s/---- 等，对应待实测确认） */
+/* 图标段位表：S1..S30（十字架/时钟/感叹号/圆/Rpm/°C/H/m/s/---- 等，坐标见规格书第 3 页） */
 static const lcd_seg_t lcdIconMap[30] = {
   /* S1  */ LSEG(1,1),   /* S2  */ LSEG(3,1),   /* S3  */ LSEG(5,1),
   /* S4  */ LSEG(28,2),  /* S5  */ LSEG(7,1),   /* S6  */ LSEG(1,5),
@@ -107,26 +104,23 @@ static const struct {
 /* 业务图标角色（图标 → S 编号绑定见 iconBind） */
 typedef enum {
   ROLE_SENSOR = 0,   /* 十字架：PT1000 在位（A5） */
-  ROLE_CLOCK,        /* 时钟：计时作业中（RUNNING 即亮；2026-09-16 实测修正） */
+  ROLE_CLOCK,        /* 时钟：实际倒计时期间亮 */
   ROLE_WARN,         /* 感叹号：本版恒灭（A8） */
-  ROLE_MOTOR,        /* 圆：转速 > 0 */
-  ROLE_ARROW,        /* ▲：RUNNING 常亮（A7） */
+  ROLE_MOTOR,        /* 圆：RUNNING 且实测转速 > 0 */
   ROLE_COUNT
 } icon_role_t;
 
-/* 业务图标 → S 编号绑定（0=未绑定不亮；lcd sweep 实测 2026-09-16，30/30 全匹配：
-   十字架=S30、时钟=S1、圆（旋转圈）=S4、▲=S3；感叹号玻璃未做该段（需求"本版恒灭"） */
-static const uint8_t iconBind[ROLE_COUNT] = { 30U, 1U, 0U, 4U, 3U };
+/* 2026-10-08 按玻璃规格书第 3 页纠正：S1 是 Set Speed 标签，S2 是时钟，
+   S3 是警告三角感叹号，非独立运行箭头；感叹号按用户确认本版恒灭。 */
+static const uint8_t iconBind[ROLE_COUNT] = { 30U, 2U, 3U, 4U };
 
-/* 段位语义表（lcd sweep 实测 2026-09-16，30/30 全匹配，完整表见《显示屏阶段性问题排查结果》）
-   S1=时钟图标 S2=Set Speed字 S3=▲图标 S4=圆图标 S5=Rpm(上) S6=Set Time字 S7/8/9=H/m/s(上)
-   S10-S19=中间十条横线（隔断线，常显）
-   S20=Instant Speed字 S21=Rpm(下) S22=Remaining Time字 S23/24/25=H/m/s(下)
-   S26/S27=Instant Temp标签（拆两段，随探头在位）S28=温度小数点 S29=℃ S30=十字架 */
+/* S5=Rpm(上)，S6=Set Time，S7/8/9=H/m/s(上)，S10~19=隔断线；
+   S20=Instant Speed，S21=Rpm(下)，S22=Remaining Time，S23/24/25=H/m/s(下)；
+   S26/27=Instant Temp，S28=小数点，S29=℃，S30=探头十字架。 */
 
 /* 固定常显段（标签/单位/隔断线） */
 static const uint8_t dispAlwaysOn[] = {
-  2U, 5U, 6U, 7U, 8U, 9U,                       /* 上半：Set Speed / Rpm / Set Time / H m s */
+  1U, 5U, 6U, 7U, 8U, 9U,                       /* 上半：Set Speed / Rpm / Set Time / H m s */
   10U, 11U, 12U, 13U, 14U, 15U, 16U, 17U, 18U, 19U,   /* 中间十条横线（隔断线） */
   20U, 21U, 22U, 23U, 24U, 25U                  /* 下半：Instant Speed / Rpm / Remaining Time / H m s */
 };
@@ -142,6 +136,9 @@ static const uint8_t dispAlwaysOn[] = {
 #define DISP_SWEEP_STEP_MS 1500U
 
 /* ====================== 模块状态 ====================== */
+
+static display_view_t displayView;             /* app_state 推送，只在主循环访问 */
+static uint16_t dispTarget = 0U;                /* 吸附对应的目标转速 */
 
 static uint8_t lcdRam[HT1623_RAM_NIBBLES];       /* 当前帧镜像 */
 static uint8_t lcdRamPrev[HT1623_RAM_NIBBLES];   /* 上次送屏镜像（差分检测） */
@@ -333,7 +330,7 @@ static void draw_two_digits(uint8_t first, uint8_t v)
   */
 static void display_smooth_speed(void)
 {
-  uint16_t raw = speed_sensor_get_rpm();
+  uint16_t raw = displayView.raw_rpm;
   int32_t  d   = (int32_t)raw - (int32_t)dispSpeed;
 
   if (raw == 0U)
@@ -357,22 +354,28 @@ static void display_smooth_speed(void)
 
 /**
   * @brief  Instant Speed Reach 吸附 / 偏离回退状态推进（50ms 一拍，2026-10-01 用户调试决策）
-  * @note   判定用 speed_sensor 原始实测值（与控制链/A12 同源，不能用 dispSpeed——
+  * @note   判定用 快照中的原始实测值（与控制链/A12 同源，不能用 dispSpeed——
   *         平滑值有 ±DIV 截断死区，可能永远到不了 ±2）；显示值仍走 dispSpeed 平滑。
   *         非 RUNNING 不吸附（停止后回实时显示随惯性衰减）；
   *         RUNNING 实测连续 DISP_REACH_HOLD_PATS 拍进入 ±DISP_REACH_RPM → 吸附
   *         （显示锁定目标值；dispSpeed 同步对齐目标值，防回退跳变）；
   *         吸附态中连续 DISP_DEVIATE_HOLD_PATS 拍偏离超过 ±DISP_DEVIATE_RPM 才回退
   *         实时显示（dispSpeed 同步对齐实测值，回退即实时、无平滑滞后）；
-  *         回到 ±2 内持续 N 拍重新吸附。去抖防单拍毛刺（测速量化/EMA 阶梯）误锁误退。
+  *         回到 ±DISP_REACH_RPM 内持续 N 拍重新吸附。去抖防单拍毛刺（测速量化/EMA 阶梯）误锁误退。
   */
 static void display_reach_update(app_mode_t mode, uint16_t cfgRpm)
 {
-  uint16_t raw = speed_sensor_get_rpm();
+  uint16_t raw = displayView.raw_rpm;
   int32_t  d   = (int32_t)raw - (int32_t)cfgRpm;
 
-  if (mode != APP_RUNNING)
+  if ((mode != APP_RUNNING) || (raw == 0U) || (cfgRpm != dispTarget))
   {
+    if ((dispReached != 0U) || (raw == 0U) || (cfgRpm != dispTarget))
+    {
+      dispSpeed = raw;
+    }
+    dispTarget = cfgRpm;
+    /* 停止/改目标/零速当拍回实测，不能沿用旧目标吸附 */
     dispReached  = 0U;   /* 待机/暂停：恒实时显示 */
     dispReachCnt = 0U;
     return;
@@ -419,7 +422,7 @@ static void display_reach_update(app_mode_t mode, uint16_t cfgRpm)
 /* ====================== 业务渲染 ====================== */
 
 /**
-  * @brief  整屏业务刷新：重建 RAM 镜像（数据经各模块 getter 周期拉取）
+  * @brief  整屏业务刷新：重建 RAM 镜像（数据来自 app_state 推送的完整快照）
   * @note   编辑字段在闪烁灭相消隐；有变化才置脏（Task 50ms 调用）
   */
 static void display_render(void)
@@ -438,27 +441,28 @@ static void display_render(void)
   memset(lcdRam, 0U, HT1623_RAM_NIBBLES);
   lcdDirty = 0U;
 
-  mode    = app_state_get_mode();
-  edit    = app_state_get_edit();
-  cfgRpm  = app_state_get_cfg_rpm();
-  app_state_get_cfg_time(&cfgH, &cfgM, &cfgS);
-  timer_get_rem(&remH, &remM, &remS);
+  mode    = displayView.mode;
+  edit    = displayView.edit;
+  cfgRpm  = displayView.cfg_rpm;
+  cfgH    = displayView.cfg_h;
+  cfgM    = displayView.cfg_m;
+  cfgS    = displayView.cfg_s;
+  remH    = displayView.rem_h;
+  remM    = displayView.rem_m;
+  remS    = displayView.rem_s;
 
   /* Instant Speed 平滑更新放最前：图标与字段同用当拍值（无帧滞后）；
-     reach/偏离状态同拍推进（2026-10-01：进入 ±2 吸附目标值 / 偏离 >±15 回退实时） */
+     reach/偏离状态同拍推进（2026-10-01：进入 ±DISP_REACH_RPM 吸附目标值 / 偏离 >±15 回退实时） */
   display_smooth_speed();
   display_reach_update(mode, cfgRpm);
 
-  /* ---- 图标 ---- */
-  /* 圆图标 = 显示平滑转速 > 0（闭环后数据源切 speed_sensor，真实转动状态；2026-09-15） */
-  set_role_icon((uint8_t)ROLE_MOTOR, (dispSpeed > 0U) ? 1U : 0U);
-  /* 时钟图标 = 计时作业中：按 START 即亮（含加速段），暂停/待机/停止灭。
-     2026-09-16 实测修正：原"到达目标后才亮"→"启动即亮"，匹配需求简述 3 节
-     "电机转动后：圆图标点亮、时钟图标点亮"；倒数自 2026-09-17 起亦为 START 即开始。 */
-  set_role_icon((uint8_t)ROLE_CLOCK, (mode == APP_RUNNING) ? 1U : 0U);
-  set_role_icon((uint8_t)ROLE_ARROW, (mode == APP_RUNNING) ? 1U : 0U);
+  /* ---- 图标：暂停立即熄灭时钟/圆，感叹号本版固定灭 ---- */
+  set_role_icon((uint8_t)ROLE_MOTOR,
+                ((mode == APP_RUNNING) && (displayView.raw_rpm > 0U)) ? 1U : 0U);
+  set_role_icon((uint8_t)ROLE_CLOCK,
+                ((mode == APP_RUNNING) && (displayView.timer_active != 0U)) ? 1U : 0U);
   set_role_icon((uint8_t)ROLE_WARN, 0U);
-  set_role_icon((uint8_t)ROLE_SENSOR, temp_sensor_is_valid());
+  set_role_icon((uint8_t)ROLE_SENSOR, displayView.temp_valid);
 
   /* ---- 常显段：标签/单位/十条隔断线（lcd sweep 实测 2026-09-16） ---- */
   for (uint8_t i = 0U; i < (uint8_t)DISP_ALWAYS_ON_COUNT; i++)
@@ -492,7 +496,7 @@ static void display_render(void)
         非 RUNNING：实时显示（dispSpeed 平滑实测值，停止后随惯性衰减至 0）；
         RUNNING：实测连续 N 拍进入目标 ±DISP_REACH_RPM → 吸附（显示锁定目标值）；
         吸附态中连续 N 拍偏离超过 ±DISP_DEVIATE_RPM → 回退（dispSpeed 已对齐实测值，即实时）；
-        回到 ±2 内持续 N 拍重新吸附。去抖防单拍毛刺误锁误退。
+        回到 ±DISP_REACH_RPM 内持续 N 拍重新吸附。去抖防单拍毛刺误锁误退。
         平滑规则沿用 display_smooth_speed；控制链（PID/A12）仍用 speed_sensor 原始值，不受影响。 */
   draw_number_rl(fieldLayout[FLD_INST_SPEED].first,
                  fieldLayout[FLD_INST_SPEED].len,
@@ -512,9 +516,9 @@ static void display_render(void)
   lcd_set_icon(DISP_TEMP_LBL_A, 1U);
   lcd_set_icon(DISP_TEMP_LBL_B, 1U);
 #else
-  if (temp_sensor_is_valid() != 0U)
+  if (displayView.temp_valid != 0U)
   {
-    int16_t t10 = temp_sensor_get_deci_c();
+    int16_t t10 = displayView.temp_deci_c;
 
     if (t10 < 0)
     {
@@ -547,10 +551,10 @@ static void display_render(void)
   draw_two_digits(REM_S_FIRST, remS);
 
   /* 缓冲有变化才置脏（避免每 50ms 全量串行写屏阻塞主循环） */
-  if (memcmp(lcdRam, lcdRamPrev, HT1623_RAM_NIBBLES) != 0)
+  lcdDirty = (memcmp(lcdRam, lcdRamPrev, HT1623_RAM_NIBBLES) != 0) ? 1U : 0U;
+  if (lcdDirty != 0U)
   {
     memcpy(lcdRamPrev, lcdRam, HT1623_RAM_NIBBLES);
-    lcdDirty = 1U;
   }
 }
 
@@ -563,9 +567,25 @@ void display_init(void)
   lcdDirty    = 0U;
   lcdManual   = 0U;
   blinkPhase  = 0U;
+  dispSpeed = 0U;
+  dispTarget = 0U;
+  dispReached = 0U;
+  dispReachCnt = 0U;
+  sweepActive = 0U;
+  sweepNum = 0U;
+  sweepMs = 0U;
+  memset(&displayView, 0, sizeof(displayView));
 
   ht1623_init();   /* 端口 + 清屏 + RC32K + 开显示 */
   evt_bus_subscribe(EVT_MOD_DISPLAY, EVT_BLINK_TOGGLE);
+}
+
+void display_set_view(const display_view_t *view)
+{
+  if (view != 0)
+  {
+    displayView = *view;
+  }
 }
 
 void display_on_event(evt_type_t type, uint16_t val)
