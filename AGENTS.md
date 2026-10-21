@@ -45,4 +45,4 @@
 
 - S1=Set Speed 标签常显，S2=时钟（RUNNING 且倒计时 active），S3=感叹号恒灭，S4=圆（RUNNING 且实测>0，暂停即灭），S30=PT1000 在位；无独立运行箭头。
 - 旧 S1/S2/S3 “全匹配”记录错误，已按屏规格书第 3 页纠正。详细问题/测试/上板待验见 `doc/审核报告.md` 第 8 节。
-- 主机回归：`python3 tests/test_ui.py`；语法检查：`python3 tests/check_syntax.py`；仍需 Keil `-Oz` 编译检查内存余量与烧录复核。
+- 仍需 Keil `-Oz` 编译检查内存余量与烧录上板目视复核。
